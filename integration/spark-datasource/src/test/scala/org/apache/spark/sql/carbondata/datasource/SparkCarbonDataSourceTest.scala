@@ -16,7 +16,7 @@
  */
 package org.apache.spark.sql.carbondata.datasource
 
-import java.io.{File, IOException}
+import java.io.File
 import java.util
 
 import scala.collection.JavaConverters._
@@ -1858,7 +1858,7 @@ class SparkCarbonDataSourceTest extends FunSuite with BeforeAndAfterAll {
     assert(ex.getMessage.contains("column: abc specified in inverted index columns does not exist in schema"))
   }
 
-  var writerPath = new File(this.getClass.getResource("/").getPath
+  var WriterOutputPath = new File(this.getClass.getResource("/").getPath
           + "../../target/SparkCarbonFileFormat/WriterOutput/")
           .getCanonicalPath
 
@@ -1877,7 +1877,7 @@ class SparkCarbonDataSourceTest extends FunSuite with BeforeAndAfterAll {
            |) USING CARBON  """.stripMargin)
 
       val exception = intercept[Exception] {
-        sql(s"load data local inpath '$writerPath' into table binaryCarbon")
+        sql(s"load data local inpath '$WriterOutputPath' into table binaryCarbon")
       }
       assert(exception.getMessage.contains("LOAD DATA is not supported for datasource tables"))
     }
