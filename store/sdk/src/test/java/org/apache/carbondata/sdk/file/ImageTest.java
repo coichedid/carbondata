@@ -720,6 +720,32 @@ public class ImageTest extends TestCase {
     }
   }
 
+  public void testInvalidValueForBinaryDecoder() throws IOException, InvalidLoadOptionException {
+    String path = "./target/binary";
+    Field[] fields = new Field[7];
+    fields[0] = new Field("name", DataTypes.STRING);
+    fields[1] = new Field("age", DataTypes.INT);
+    fields[2] = new Field("image1", DataTypes.BINARY);
+    fields[3] = new Field("image2", DataTypes.BINARY);
+    fields[4] = new Field("image3", DataTypes.BINARY);
+    fields[5] = new Field("decodeString", DataTypes.BINARY);
+    fields[6] = new Field("decodeByte", DataTypes.BINARY);
+    try {
+      CarbonWriter
+          .builder()
+          .outputPath(path)
+          .withCsvInput(new Schema(fields))
+          .writtenBy("SDKS3Example")
+          .withPageSizeInMb(1)
+          .withLoadOption("binary_decoder", "base")
+          .build();
+      Assert.assertTrue(false);
+    } catch (IllegalArgumentException e) {
+      Assert.assertTrue(e.getMessage().contains(
+          "Binary decoder only support Base64, Hex or no decode for string, don't support base"));
+    }
+  }
+
   public void binaryToCarbonWithHWD(String sourceImageFolder, String outputPath, String preDestPath,
                                     String sufAnnotation, final String sufImage, int numToWrite)
       throws Exception {

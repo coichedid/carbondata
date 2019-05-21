@@ -235,7 +235,7 @@ public class CarbonLoadModel implements Serializable {
   private String columnCompressor;
 
   /**
-   * carbon binary decoder for loding data
+   * carbon binary decoder for loading data
    */
   private String binaryDecoder;
 

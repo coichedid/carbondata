@@ -96,7 +96,7 @@ public class FieldEncoderFactory {
    * @param isEmptyBadRecord        whether is Empty BadRecord
    * @param parentTablePath         parent tabel path
    * @param isConvertToBinary       whether the no dictionary field to be converted to binary or not
-   * @param binaryEncoder           carbon binary decoder for loading data
+   * @param binaryDecoder           carbon binary decoder for loading data
    * @return
    * @throws IOException
    */
@@ -104,7 +104,7 @@ public class FieldEncoderFactory {
       AbsoluteTableIdentifier absoluteTableIdentifier, int index, String nullFormat,
       DictionaryClient client, Boolean useOnePass, Map<Object, Integer> localCache,
       boolean isEmptyBadRecord, String parentTablePath,
-      boolean isConvertToBinary, String binaryEncoder)
+      boolean isConvertToBinary, String binaryDecoder)
       throws IOException {
     // Converters are only needed for dimensions and measures it return null.
     if (dataField.getColumn().isDimension()) {
@@ -151,7 +151,7 @@ public class FieldEncoderFactory {
                 client, useOnePass, localCache, index, nullFormat, isEmptyBadRecord), index);
       } else if (dataField.getColumn().getDataType() == DataTypes.BINARY) {
         return new BinaryFieldConverterImpl(dataField, nullFormat,
-            index, isEmptyBadRecord, binaryEncoder);
+            index, isEmptyBadRecord, binaryDecoder);
       } else {
         // if the no dictionary column is a numeric column and no need to convert to binary
         // then treat it is as measure col

@@ -229,6 +229,12 @@ public class CarbonWriterBuilder {
         if (escapeChar.length() > 1 && !CarbonLoaderUtil.isValidEscapeSequence(escapeChar)) {
           throw new IllegalArgumentException("ESCAPECHAR cannot be more than one character.");
         }
+      } else if (entry.getKey().toLowerCase().equalsIgnoreCase("binary_decoder")) {
+        String binaryDecoderChar = entry.getValue();
+        if (binaryDecoderChar.length() > 1 && !CarbonLoaderUtil.isValidBinaryDecoder(binaryDecoderChar)) {
+          throw new IllegalArgumentException("Binary decoder only support Base64, " +
+              "Hex or no decode for string, don't support " + binaryDecoderChar);
+        }
       }
     }
 

@@ -1324,6 +1324,31 @@ class TestBinaryDataType extends QueryTest with BeforeAndAfterAll {
         }
     }
 
+    test("Create table and load data with binary column with invalid value") {
+        sql("DROP TABLE IF EXISTS binaryTable")
+        sql(
+            s"""
+               | CREATE TABLE IF NOT EXISTS binaryTable (
+               |    id int,
+               |    label boolean,
+               |    name string,
+               |    binaryField binary,
+               |    autoLabel boolean)
+               | STORED BY 'carbondata'
+               | TBLPROPERTIES('SORT_COLUMNS'='')
+             """.stripMargin)
+        val e = intercept[Exception] {
+            sql(
+                s"""
+                   | LOAD DATA LOCAL INPATH '$resourcesPath/binaryDataHex.csv'
+                   | INTO TABLE binaryTable
+                   | OPTIONS('header'='false','binary_decoder'='he')
+             """.stripMargin)
+        }
+        assert(e.getMessage().contains(
+            "Binary decoder only support Base64, Hex or no decode for string, don't support he"))
+    }
+
     override def afterAll: Unit = {
         sql("DROP TABLE IF EXISTS binaryTable")
         sql("DROP TABLE IF EXISTS hiveTable")

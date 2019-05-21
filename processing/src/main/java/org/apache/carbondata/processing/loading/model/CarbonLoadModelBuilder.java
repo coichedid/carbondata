@@ -228,7 +228,6 @@ public class CarbonLoadModelBuilder {
 
     String binaryDecoder = options.get("binary_decoder");
     carbonLoadModel.setBinaryDecoder(binaryDecoder);
-
     carbonLoadModel.setTimestampformat(timestampformat);
     carbonLoadModel.setDateFormat(dateFormat);
     carbonLoadModel.setDefaultTimestampFormat(
