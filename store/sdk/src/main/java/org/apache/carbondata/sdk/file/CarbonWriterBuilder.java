@@ -231,7 +231,8 @@ public class CarbonWriterBuilder {
         }
       } else if (entry.getKey().toLowerCase().equalsIgnoreCase("binary_decoder")) {
         String binaryDecoderChar = entry.getValue();
-        if (binaryDecoderChar.length() > 1 && !CarbonLoaderUtil.isValidBinaryDecoder(binaryDecoderChar)) {
+        if (binaryDecoderChar.length() > 1 &&
+            !CarbonLoaderUtil.isValidBinaryDecoder(binaryDecoderChar)) {
           throw new IllegalArgumentException("Binary decoder only support Base64, " +
               "Hex or no decode for string, don't support " + binaryDecoderChar);
         }
