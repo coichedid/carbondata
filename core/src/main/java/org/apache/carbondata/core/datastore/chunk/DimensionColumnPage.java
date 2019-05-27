@@ -16,7 +16,8 @@
  */
 package org.apache.carbondata.core.datastore.chunk;
 
-import org.apache.carbondata.core.scan.executor.infos.KeyStructureInfo;
+import java.util.BitSet;
+
 import org.apache.carbondata.core.scan.result.vector.ColumnVectorInfo;
 
 /**
@@ -31,7 +32,7 @@ public interface DimensionColumnPage {
    * @param data   data to filed
    * @return how many bytes was copied
    */
-  int fillRawData(int rowId, int offset, byte[] data, KeyStructureInfo restructuringInfo);
+  int fillRawData(int rowId, int offset, byte[] data);
 
   /**
    * It uses to convert column data to dictionary integer value
@@ -39,31 +40,26 @@ public interface DimensionColumnPage {
    * @param rowId
    * @param chunkIndex
    * @param outputSurrogateKey
-   * @param restructuringInfo @return
+   * @return
    */
-  int fillSurrogateKey(int rowId, int chunkIndex, int[] outputSurrogateKey,
-      KeyStructureInfo restructuringInfo);
+  int fillSurrogateKey(int rowId, int chunkIndex, int[] outputSurrogateKey);
 
   /**
    * Fill the data to vector
    * @param vectorInfo
    * @param chunkIndex
-   * @param restructuringInfo
    * @return next column index
    */
-  int fillVector(ColumnVectorInfo[] vectorInfo, int chunkIndex,
-      KeyStructureInfo restructuringInfo);
+  int fillVector(ColumnVectorInfo[] vectorInfo, int chunkIndex);
 
   /**
    * Fill the data to vector
    * @param filteredRowId
    * @param vectorInfo
    * @param chunkIndex
-   * @param restructuringInfo
    * @return next column index
    */
-  int fillVector(int[] filteredRowId, ColumnVectorInfo[] vectorInfo, int chunkIndex,
-      KeyStructureInfo restructuringInfo);
+  int fillVector(int[] filteredRowId, ColumnVectorInfo[] vectorInfo, int chunkIndex);
 
   /**
    * Below method to get  the data based in row id
@@ -107,5 +103,15 @@ public interface DimensionColumnPage {
    * below method will be used to free the allocated memory
    */
   void freeMemory();
+
+  /**
+   * to check whether the page is adaptive encoded
+   */
+  boolean isAdaptiveEncoded();
+
+  /**
+   * to get the null bit sets in case of adaptive encoded page
+   */
+  BitSet getNullBits();
 
 }

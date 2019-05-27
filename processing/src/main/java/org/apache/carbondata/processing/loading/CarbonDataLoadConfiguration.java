@@ -28,6 +28,7 @@ import org.apache.carbondata.core.keygenerator.KeyGenerator;
 import org.apache.carbondata.core.keygenerator.factory.KeyGeneratorFactory;
 import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier;
 import org.apache.carbondata.core.metadata.datatype.DataType;
+import org.apache.carbondata.core.metadata.encoder.Encoding;
 import org.apache.carbondata.core.metadata.schema.BucketingInfo;
 import org.apache.carbondata.core.metadata.schema.SortColumnRangeInfo;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonColumn;
@@ -87,7 +88,9 @@ public class CarbonDataLoadConfiguration {
 
   private int noDictionaryCount;
 
-  private int complexColumnCount;
+  private int complexDictionaryColumnCount;
+
+  private int complexNonDictionaryColumnCount;
 
   /**
    * schema updated time stamp to be used for restructure scenarios
@@ -110,14 +113,31 @@ public class CarbonDataLoadConfiguration {
 
   private SortColumnRangeInfo sortColumnRangeInfo;
 
-  private boolean carbonUnmanagedTable;
+  private boolean carbonTransactionalTable;
 
   /**
    * Flder path to where data should be written for this load.
    */
   private String dataWritePath;
 
+  private String parentTablePath;
+
+  /**
+   * name of compressor to be used to compress column page
+   */
+  private String columnCompressor;
+
+  private int numberOfLoadingCores;
+
   public CarbonDataLoadConfiguration() {
+  }
+
+  public String getParentTablePath() {
+    return parentTablePath;
+  }
+
+  public void setParentTablePath(String parentTablePath) {
+    this.parentTablePath = parentTablePath;
   }
 
   public void setDataFields(DataField[] dataFields) {
@@ -128,13 +148,17 @@ public class CarbonDataLoadConfiguration {
       CarbonColumn column = dataField.getColumn();
       if (column.isDimension()) {
         dimensionCount++;
-        if (!dataField.hasDictionaryEncoding()) {
+        if (column.isComplex()) {
+          if (!dataField.hasDictionaryEncoding()) {
+            complexNonDictionaryColumnCount++;
+          } else {
+            complexDictionaryColumnCount++;
+          }
+        } else if (!dataField.hasDictionaryEncoding()) {
           noDictionaryCount++;
         }
       }
-      if (column.isComplex()) {
-        complexColumnCount++;
-      }
+
       if (column.isMeasure()) {
         measureCount++;
       }
@@ -153,8 +177,8 @@ public class CarbonDataLoadConfiguration {
     return noDictionaryCount;
   }
 
-  public int getComplexColumnCount() {
-    return complexColumnCount;
+  public int getComplexDictionaryColumnCount() {
+    return complexDictionaryColumnCount;
   }
 
   public int getMeasureCount() {
@@ -318,6 +342,45 @@ public class CarbonDataLoadConfiguration {
     return type;
   }
 
+  /**
+   * Get the data types of the no dictionary and the complex dimensions of the table
+   *
+   * @return
+   */
+  public CarbonColumn[] getNoDictAndComplexDimensions() {
+    List<Integer> noDicOrCompIndexes = new ArrayList<>(dataFields.length);
+    int noDicCount = 0;
+    for (int i = 0; i < dataFields.length; i++) {
+      if (dataFields[i].getColumn().isDimension() && (
+          !(dataFields[i].getColumn().hasEncoding(Encoding.DICTIONARY)) || dataFields[i].getColumn()
+              .isComplex())) {
+        noDicOrCompIndexes.add(i);
+        noDicCount++;
+      }
+    }
+
+    CarbonColumn[] dims = new CarbonColumn[noDicCount];
+    for (int i = 0; i < dims.length; i++) {
+      dims[i] = dataFields[noDicOrCompIndexes.get(i)].getColumn();
+    }
+    return dims;
+  }
+
+  /**
+   * Get the sort column mapping of the table
+   *
+   * @return
+   */
+  public boolean[] getSortColumnMapping() {
+    boolean[] sortColumnMapping = new boolean[dataFields.length];
+    for (int i = 0; i < sortColumnMapping.length; i++) {
+      if (dataFields[i].getColumn().getColumnSchema().isSortColumn()) {
+        sortColumnMapping[i] = true;
+      }
+    }
+    return sortColumnMapping;
+  }
+
   public int[] calcDimensionLengths() {
     int[] dimLensWithComplex = getCardinalityFinder().getCardinality();
     if (!isSortTable()) {
@@ -380,11 +443,31 @@ public class CarbonDataLoadConfiguration {
     this.sortColumnRangeInfo = sortColumnRangeInfo;
   }
 
-  public boolean isCarbonUnmanagedTable() {
-    return carbonUnmanagedTable;
+  public boolean isCarbonTransactionalTable() {
+    return carbonTransactionalTable;
   }
 
-  public void setCarbonUnmanagedTable(boolean carbonUnmanagedTable) {
-    this.carbonUnmanagedTable = carbonUnmanagedTable;
+  public void setCarbonTransactionalTable(boolean carbonTransactionalTable) {
+    this.carbonTransactionalTable = carbonTransactionalTable;
+  }
+
+  public int getComplexNonDictionaryColumnCount() {
+    return complexNonDictionaryColumnCount;
+  }
+
+  public String getColumnCompressor() {
+    return columnCompressor;
+  }
+
+  public void setColumnCompressor(String columnCompressor) {
+    this.columnCompressor = columnCompressor;
+  }
+
+  public int getNumberOfLoadingCores() {
+    return numberOfLoadingCores;
+  }
+
+  public void setNumberOfLoadingCores(int numberOfLoadingCores) {
+    this.numberOfLoadingCores = numberOfLoadingCores;
   }
 }

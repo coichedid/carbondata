@@ -30,7 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier;
@@ -38,13 +37,15 @@ import org.apache.carbondata.core.metadata.CarbonTableIdentifier;
 import org.apache.carbondata.core.metadata.schema.table.column.ColumnSchema;
 import org.apache.carbondata.core.metadata.schema.table.column.ParentColumnTableRelation;
 
+import org.apache.log4j.Logger;
+
 /**
  * Store the information about the table.
  * it stores the fact table as well as aggregate table present in the schema
  */
 public class TableInfo implements Serializable, Writable {
 
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(TableInfo.class.getName());
 
   /**
@@ -78,12 +79,17 @@ public class TableInfo implements Serializable, Writable {
   private String tablePath;
 
   /**
-   * The boolean field which points if the data written for UnManaged Table
-   * or Managed Table. The difference between managed and unManaged table is
-   * unManaged Table will not contain any Metadata folder and subsequently
+   * The boolean field which points if the data written for Non Transactional Table
+   * or Transactional Table. The difference between Transactional and Non Transactional table is
+   * Non Transactional Table will not contain any Metadata folder and subsequently
    * no TableStatus or Schema files.
+   * All ACID properties cannot be aplied to Non Transactional Table as there is no Commit points
+   * i.e. no TableStatus File.
+   * What ever files present in the path will be read but it system doesnot ensure ACID rules for
+   * this data, mostly Consistency part.
+   *
    */
-  private boolean isUnManagedTable;
+  private boolean isTransactionalTable = true;
 
   // this identifier is a lazy field which will be created when it is used first time
   private AbsoluteTableIdentifier identifier;
@@ -92,8 +98,14 @@ public class TableInfo implements Serializable, Writable {
 
   private List<RelationIdentifier> parentRelationIdentifiers;
 
+  /**
+   * flag to check whether any schema modification operation has happened after creation of table
+   */
+  private boolean isSchemaModified;
+
   public TableInfo() {
     dataMapSchemaList = new ArrayList<>();
+    isTransactionalTable = true;
   }
 
   /**
@@ -109,6 +121,18 @@ public class TableInfo implements Serializable, Writable {
   public void setFactTable(TableSchema factTable) {
     this.factTable = factTable;
     updateParentRelationIdentifier();
+    updateIsSchemaModified();
+  }
+
+  private void updateIsSchemaModified() {
+    if (null != factTable.getSchemaEvolution()) {
+      // If schema evolution entry list size is > 1 that means an alter operation is performed
+      // which has added the new schema entry in the schema evolution list.
+      // Currently apart from create table schema evolution entries
+      // are getting added only in the alter operations.
+      isSchemaModified =
+          factTable.getSchemaEvolution().getSchemaEvolutionEntryList().size() > 1 ? true : false;
+    }
   }
 
   private void updateParentRelationIdentifier() {
@@ -233,10 +257,13 @@ public class TableInfo implements Serializable, Writable {
       tableBlockSize = tableProperties.get(CarbonCommonConstants.TABLE_BLOCKSIZE);
     }
     if (null == tableBlockSize) {
-      tableBlockSize = CarbonCommonConstants.BLOCK_SIZE_DEFAULT_VAL;
-      LOGGER.info("Table block size not specified for " + getTableUniqueName()
-          + ". Therefore considering the default value "
-          + CarbonCommonConstants.BLOCK_SIZE_DEFAULT_VAL + " MB");
+      tableBlockSize = CarbonCommonConstants.TABLE_BLOCK_SIZE_DEFAULT;
+      if (LOGGER.isDebugEnabled()) {
+        LOGGER.debug(
+            "Table block size not specified for " + getTableUniqueName() +
+                ". Therefore considering the default value " +
+                CarbonCommonConstants.TABLE_BLOCK_SIZE_DEFAULT + " MB");
+      }
     }
     return Integer.parseInt(tableBlockSize);
   }
@@ -248,7 +275,7 @@ public class TableInfo implements Serializable, Writable {
     factTable.write(out);
     out.writeLong(lastUpdatedTime);
     out.writeUTF(getOrCreateAbsoluteTableIdentifier().getTablePath());
-    out.writeBoolean(isUnManagedTable);
+    out.writeBoolean(isTransactionalTable);
     boolean isChildSchemaExists =
         null != dataMapSchemaList && dataMapSchemaList.size() > 0;
     out.writeBoolean(isChildSchemaExists);
@@ -267,6 +294,7 @@ public class TableInfo implements Serializable, Writable {
         parentRelationIdentifiers.get(i).write(out);
       }
     }
+    out.writeBoolean(isSchemaModified);
   }
 
   @Override public void readFields(DataInput in) throws IOException {
@@ -276,7 +304,7 @@ public class TableInfo implements Serializable, Writable {
     this.factTable.readFields(in);
     this.lastUpdatedTime = in.readLong();
     this.tablePath = in.readUTF();
-    this.isUnManagedTable = in.readBoolean();
+    this.isTransactionalTable = in.readBoolean();
     boolean isChildSchemaExists = in.readBoolean();
     this.dataMapSchemaList = new ArrayList<>();
     if (isChildSchemaExists) {
@@ -302,6 +330,7 @@ public class TableInfo implements Serializable, Writable {
         this.parentRelationIdentifiers.add(relationIdentifier);
       }
     }
+    this.isSchemaModified = in.readBoolean();
   }
 
   public AbsoluteTableIdentifier getOrCreateAbsoluteTableIdentifier() {
@@ -330,11 +359,16 @@ public class TableInfo implements Serializable, Writable {
     return parentRelationIdentifiers;
   }
 
-  public boolean isUnManagedTable() {
-    return isUnManagedTable;
+  public boolean isTransactionalTable() {
+    return isTransactionalTable;
   }
 
-  public void setUnManagedTable(boolean unManagedTable) {
-    isUnManagedTable = unManagedTable;
+  public void setTransactionalTable(boolean transactionalTable) {
+    isTransactionalTable = transactionalTable;
   }
+
+  public boolean isSchemaModified() {
+    return isSchemaModified;
+  }
+
 }

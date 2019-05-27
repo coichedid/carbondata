@@ -18,12 +18,10 @@ package org.apache.carbondata.processing.merger;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.datastore.block.TableBlockInfo;
@@ -40,13 +38,14 @@ import org.apache.carbondata.core.util.CarbonUtil;
 import org.apache.carbondata.core.util.path.CarbonTablePath;
 
 import org.apache.commons.lang3.ArrayUtils;
+import org.apache.log4j.Logger;
 
 /**
  * Utility Class for the Compaction Flow.
  */
 public class CarbonCompactionUtil {
 
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(CarbonCompactionUtil.class.getName());
 
   /**
@@ -125,9 +124,9 @@ public class CarbonCompactionUtil {
       // This decision will impact the compaction performance so it needs to be decided carefully
       if (null != blockInfo.getDetailInfo()
           && blockInfo.getDetailInfo().getSchemaUpdatedTimeStamp() == 0L) {
-        dataFileMatadata = CarbonUtil.readMetadatFile(blockInfo, true);
+        dataFileMatadata = CarbonUtil.readMetadataFile(blockInfo, true);
       } else {
-        dataFileMatadata = CarbonUtil.readMetadatFile(blockInfo);
+        dataFileMatadata = CarbonUtil.readMetadataFile(blockInfo);
       }
       if (null == metadataList) {
         // if it is not present
@@ -380,37 +379,6 @@ public class CarbonCompactionUtil {
         if (tableLastUpdatedTime > dataFileFooter.getSchemaUpdatedTimeStamp()) {
           restructuredBlockExists = true;
           break;
-        }
-      }
-      if (restructuredBlockExists) {
-        break;
-      }
-    }
-    return restructuredBlockExists;
-  }
-
-  /**
-   * This method will check for any restructured block in the blocks selected for compaction
-   *
-   * @param segmentMapping
-   * @param tableLastUpdatedTime
-   * @return
-   */
-  public static boolean checkIfAnyRestructuredBlockExists(Map<String, TaskBlockInfo> segmentMapping,
-      long tableLastUpdatedTime) {
-    boolean restructuredBlockExists = false;
-    for (Map.Entry<String, TaskBlockInfo> taskMap : segmentMapping.entrySet()) {
-      String segmentId = taskMap.getKey();
-      TaskBlockInfo taskBlockInfo = taskMap.getValue();
-      Collection<List<TableBlockInfo>> infoList = taskBlockInfo.getAllTableBlockInfoList();
-      for (List<TableBlockInfo> listMetadata : infoList) {
-        for (TableBlockInfo blockInfo : listMetadata) {
-          // if schema modified timestamp is greater than footer stored schema timestamp,
-          // it indicates it is a restructured block
-          if (tableLastUpdatedTime > blockInfo.getDetailInfo().getSchemaUpdatedTimeStamp()) {
-            restructuredBlockExists = true;
-            break;
-          }
         }
       }
       if (restructuredBlockExists) {

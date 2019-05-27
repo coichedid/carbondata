@@ -20,12 +20,14 @@ import java.util.Map;
 
 import org.apache.carbondata.core.datastore.DataRefNode;
 import org.apache.carbondata.core.datastore.IndexKey;
+import org.apache.carbondata.core.datastore.ReusableDataBuffer;
 import org.apache.carbondata.core.datastore.block.AbstractIndex;
 import org.apache.carbondata.core.mutate.DeleteDeltaVo;
 import org.apache.carbondata.core.scan.filter.GenericQueryType;
 import org.apache.carbondata.core.scan.filter.executer.FilterExecuter;
 import org.apache.carbondata.core.scan.model.ProjectionDimension;
 import org.apache.carbondata.core.scan.model.ProjectionMeasure;
+import org.apache.carbondata.core.stats.QueryStatisticsModel;
 
 /**
  * Below class will have all the properties which needed during query execution
@@ -86,7 +88,7 @@ public class BlockExecutionInfo {
   private int[] projectionListDimensionIndexes;
 
   /**
-   * list of dimension present in the projection
+   * list of measure present in the projection
    */
   private int[] projectionListMeasureIndexes;
 
@@ -118,11 +120,6 @@ public class BlockExecutionInfo {
    * each column value size
    */
   private int[] eachColumnValueSize;
-
-  /**
-   * column group block index in file to key structure info mapping
-   */
-  private Map<Integer, KeyStructureInfo> columnGroupToKeyStructureInfo;
 
   /**
    * filter tree to execute the filter
@@ -209,6 +206,25 @@ public class BlockExecutionInfo {
   private boolean prefetchBlocklet = true;
 
   private Map<String, DeleteDeltaVo> deletedRecordsMap;
+
+  /**
+   * whether it require to output the row id
+   */
+  private boolean requiredRowId;
+
+  /**
+   * model for collecting query stats
+   */
+  private QueryStatisticsModel queryStatisticsModel;
+
+  /**
+   * It fills the vector directly from decoded column page with out any staging and conversions
+   */
+  private boolean isDirectVectorFill;
+
+  private ReusableDataBuffer[] dimensionResusableDataBuffer;
+
+  private ReusableDataBuffer[] measureResusableDataBuffer;
 
   /**
    * @param blockIndex the tableBlock to set
@@ -414,21 +430,6 @@ public class BlockExecutionInfo {
     this.noDictionaryColumnChunkIndexes = noDictionaryColumnChunkIndexes;
   }
 
-  /**
-   * @return the columnGroupToKeyStructureInfo
-   */
-  public Map<Integer, KeyStructureInfo> getColumnGroupToKeyStructureInfo() {
-    return columnGroupToKeyStructureInfo;
-  }
-
-  /**
-   * @param columnGroupToKeyStructureInfo the columnGroupToKeyStructureInfo to set
-   */
-  public void setColumnGroupToKeyStructureInfo(
-      Map<Integer, KeyStructureInfo> columnGroupToKeyStructureInfo) {
-    this.columnGroupToKeyStructureInfo = columnGroupToKeyStructureInfo;
-  }
-
   public boolean isRawRecordDetailQuery() {
     return isRawRecordDetailQuery;
   }
@@ -617,5 +618,45 @@ public class BlockExecutionInfo {
 
   public void setPrefetchBlocklet(boolean prefetchBlocklet) {
     this.prefetchBlocklet = prefetchBlocklet;
+  }
+
+  public boolean isRequiredRowId() {
+    return requiredRowId;
+  }
+
+  public void setRequiredRowId(boolean requiredRowId) {
+    this.requiredRowId = requiredRowId;
+  }
+
+  public QueryStatisticsModel getQueryStatisticsModel() {
+    return queryStatisticsModel;
+  }
+
+  public void setQueryStatisticsModel(QueryStatisticsModel queryStatisticsModel) {
+    this.queryStatisticsModel = queryStatisticsModel;
+  }
+
+  public boolean isDirectVectorFill() {
+    return isDirectVectorFill && !isRestructuredBlock;
+  }
+
+  public void setDirectVectorFill(boolean directVectorFill) {
+    isDirectVectorFill = directVectorFill;
+  }
+
+  public ReusableDataBuffer[] getDimensionResusableDataBuffer() {
+    return dimensionResusableDataBuffer;
+  }
+
+  public void setDimensionResusableDataBuffer(ReusableDataBuffer[] dimensionResusableDataBuffer) {
+    this.dimensionResusableDataBuffer = dimensionResusableDataBuffer;
+  }
+
+  public ReusableDataBuffer[] getMeasureResusableDataBuffer() {
+    return measureResusableDataBuffer;
+  }
+
+  public void setMeasureResusableDataBuffer(ReusableDataBuffer[] measureResusableDataBuffer) {
+    this.measureResusableDataBuffer = measureResusableDataBuffer;
   }
 }

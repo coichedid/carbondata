@@ -25,6 +25,7 @@ import java.util.List;
 import org.apache.carbondata.core.datastore.impl.FileFactory;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.permission.FsPermission;
 
 public interface CarbonFile {
@@ -37,11 +38,13 @@ public interface CarbonFile {
 
   List<CarbonFile> listFiles(Boolean recurssive) throws IOException;
 
+  List<CarbonFile> listFiles(boolean recursive, CarbonFileFilter fileFilter) throws IOException;
+
   /**
    * It returns list of files with location details.
    * @return
    */
-  CarbonFile[] locationAwareListFiles() throws IOException;
+  CarbonFile[] locationAwareListFiles(PathFilter pathFilter) throws IOException;
 
   String getName();
 
@@ -57,10 +60,15 @@ public interface CarbonFile {
 
   long getSize();
 
-  boolean renameTo(String changetoName);
+  boolean renameTo(String changeToName);
 
-  boolean renameForce(String changetoName);
+  boolean renameForce(String changeToName);
 
+  /**
+   * This method will delete the files recursively from file system
+   *
+   * @return true if success
+   */
   boolean delete();
 
   boolean createNewFile();
@@ -143,7 +151,7 @@ public interface CarbonFile {
 
   boolean deleteFile(String filePath, FileFactory.FileType fileType) throws IOException;
 
-  boolean mkdirs(String filePath, FileFactory.FileType fileType) throws IOException;
+  boolean mkdirs(String filePath) throws IOException;
 
   DataOutputStream getDataOutputStreamUsingAppend(String path, FileFactory.FileType fileType)
       throws IOException;
@@ -173,4 +181,10 @@ public interface CarbonFile {
    * @throws IOException if error occurs
    */
   short getDefaultReplication(String filePath) throws IOException;
+
+  /**
+   * Get the length of this file, in bytes.
+   * @return the length of this file, in bytes.
+   */
+  long getLength();
 }

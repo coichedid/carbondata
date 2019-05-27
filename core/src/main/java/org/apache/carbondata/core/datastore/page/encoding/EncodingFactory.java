@@ -47,6 +47,7 @@ import static org.apache.carbondata.format.Encoding.ADAPTIVE_FLOATING;
 import static org.apache.carbondata.format.Encoding.ADAPTIVE_INTEGRAL;
 import static org.apache.carbondata.format.Encoding.BOOL_BYTE;
 import static org.apache.carbondata.format.Encoding.DIRECT_COMPRESS;
+import static org.apache.carbondata.format.Encoding.DIRECT_COMPRESS_VARCHAR;
 import static org.apache.carbondata.format.Encoding.RLE_INTEGRAL;
 
 /**
@@ -63,121 +64,165 @@ public abstract class EncodingFactory {
   /**
    * Return new decoder based on encoder metadata read from file
    */
-  public ColumnPageDecoder createDecoder(List<Encoding> encodings, List<ByteBuffer> encoderMetas)
-      throws IOException {
-    assert (encodings.size() == 1);
+  public ColumnPageDecoder createDecoder(List<Encoding> encodings, List<ByteBuffer> encoderMetas,
+      String compressor) throws IOException {
+    return createDecoder(encodings, encoderMetas, compressor, false);
+  }
+
+  /**
+   * Return new decoder based on encoder metadata read from file
+   * @param encodings encodings used to decode the page
+   * @param encoderMetas metadata of encodings to decode the data
+   * @param compressor Compressor name which will be used to decode data.
+   * @param fullVectorFill whether the flow should go to fill the given vector completely while
+   *                       decoding the data itself.
+   * @return decoder to decode page.
+   * @throws IOException
+   */
+  public ColumnPageDecoder createDecoder(List<Encoding> encodings, List<ByteBuffer> encoderMetas,
+      String compressor, boolean fullVectorFill) throws IOException {
+    assert (encodings.size() >= 1);
     assert (encoderMetas.size() == 1);
     Encoding encoding = encodings.get(0);
     byte[] encoderMeta = encoderMetas.get(0).array();
     ByteArrayInputStream stream = new ByteArrayInputStream(encoderMeta);
     DataInputStream in = new DataInputStream(stream);
-    if (encoding == DIRECT_COMPRESS) {
+    if (encoding == DIRECT_COMPRESS || encoding == DIRECT_COMPRESS_VARCHAR) {
       ColumnPageEncoderMeta metadata = new ColumnPageEncoderMeta();
+      metadata.setFillCompleteVector(fullVectorFill);
       metadata.readFields(in);
       return new DirectCompressCodec(metadata.getStoreDataType()).createDecoder(metadata);
     } else if (encoding == ADAPTIVE_INTEGRAL) {
       ColumnPageEncoderMeta metadata = new ColumnPageEncoderMeta();
+      metadata.setFillCompleteVector(fullVectorFill);
       metadata.readFields(in);
       SimpleStatsResult stats = PrimitivePageStatsCollector.newInstance(metadata);
       return new AdaptiveIntegralCodec(metadata.getSchemaDataType(), metadata.getStoreDataType(),
-          stats).createDecoder(metadata);
+          stats, encodings.contains(Encoding.INVERTED_INDEX)).createDecoder(metadata);
     } else if (encoding == ADAPTIVE_DELTA_INTEGRAL) {
       ColumnPageEncoderMeta metadata = new ColumnPageEncoderMeta();
+      metadata.setFillCompleteVector(fullVectorFill);
       metadata.readFields(in);
       SimpleStatsResult stats = PrimitivePageStatsCollector.newInstance(metadata);
       return new AdaptiveDeltaIntegralCodec(metadata.getSchemaDataType(),
-          metadata.getStoreDataType(), stats).createDecoder(metadata);
+          metadata.getStoreDataType(), stats, encodings.contains(Encoding.INVERTED_INDEX))
+          .createDecoder(metadata);
     } else if (encoding == ADAPTIVE_FLOATING) {
       ColumnPageEncoderMeta metadata = new ColumnPageEncoderMeta();
+      metadata.setFillCompleteVector(fullVectorFill);
       metadata.readFields(in);
       SimpleStatsResult stats = PrimitivePageStatsCollector.newInstance(metadata);
       return new AdaptiveFloatingCodec(metadata.getSchemaDataType(), metadata.getStoreDataType(),
-          stats).createDecoder(metadata);
+          stats, encodings.contains(Encoding.INVERTED_INDEX)).createDecoder(metadata);
     } else if (encoding == ADAPTIVE_DELTA_FLOATING) {
       ColumnPageEncoderMeta metadata = new ColumnPageEncoderMeta();
+      metadata.setFillCompleteVector(fullVectorFill);
       metadata.readFields(in);
       SimpleStatsResult stats = PrimitivePageStatsCollector.newInstance(metadata);
       return new AdaptiveDeltaFloatingCodec(metadata.getSchemaDataType(),
-          metadata.getStoreDataType(), stats).createDecoder(metadata);
+          metadata.getStoreDataType(), stats, encodings.contains(Encoding.INVERTED_INDEX))
+          .createDecoder(metadata);
     } else if (encoding == RLE_INTEGRAL) {
       RLEEncoderMeta metadata = new RLEEncoderMeta();
       metadata.readFields(in);
       return new RLECodec().createDecoder(metadata);
     } else if (encoding == BOOL_BYTE) {
       ColumnPageEncoderMeta metadata = new ColumnPageEncoderMeta();
+      metadata.setFillCompleteVector(fullVectorFill);
       metadata.readFields(in);
       return new DirectCompressCodec(metadata.getStoreDataType()).createDecoder(metadata);
     } else {
       // for backward compatibility
       ValueEncoderMeta metadata = CarbonUtil.deserializeEncoderMetaV3(encoderMeta);
-      return createDecoderLegacy(metadata);
+      return createDecoderLegacy(metadata, compressor, fullVectorFill);
     }
   }
 
   /**
    * Old way of creating decoder, based on algorithm
    */
-  public ColumnPageDecoder createDecoderLegacy(ValueEncoderMeta metadata) {
+  public ColumnPageDecoder createDecoderLegacy(ValueEncoderMeta metadata, String compressor) {
+    return createDecoderLegacy(metadata, compressor, false);
+  }
+
+  /**
+   * Old way of creating decoder, based on algorithm
+   */
+  private ColumnPageDecoder createDecoderLegacy(ValueEncoderMeta metadata, String compressor,
+      boolean fullVectorFill) {
+    if (null == metadata) {
+      throw new RuntimeException("internal error");
+    }
     SimpleStatsResult stats = PrimitivePageStatsCollector.newInstance(metadata);
     TableSpec.ColumnSpec spec =
         TableSpec.ColumnSpec.newInstanceLegacy("legacy", stats.getDataType(), ColumnType.MEASURE);
-    String compressor = "snappy";
     DataType dataType = DataType.getDataType(metadata.getType());
     if (dataType == DataTypes.BYTE ||
         dataType == DataTypes.SHORT ||
         dataType == DataTypes.INT ||
         dataType == DataTypes.LONG) {
       // create the codec based on algorithm and create decoder by recovering the metadata
-      ColumnPageCodec codec = DefaultEncodingFactory.selectCodecByAlgorithmForIntegral(stats);
+      ColumnPageCodec codec =
+          DefaultEncodingFactory.selectCodecByAlgorithmForIntegral(stats, false, spec);
       if (codec instanceof AdaptiveIntegralCodec) {
         AdaptiveIntegralCodec adaptiveCodec = (AdaptiveIntegralCodec) codec;
         ColumnPageEncoderMeta meta =
             new ColumnPageEncoderMeta(spec, adaptiveCodec.getTargetDataType(), stats, compressor);
+        meta.setFillCompleteVector(fullVectorFill);
         return codec.createDecoder(meta);
       } else if (codec instanceof AdaptiveDeltaIntegralCodec) {
         AdaptiveDeltaIntegralCodec adaptiveCodec = (AdaptiveDeltaIntegralCodec) codec;
         ColumnPageEncoderMeta meta =
             new ColumnPageEncoderMeta(spec, adaptiveCodec.getTargetDataType(), stats, compressor);
+        meta.setFillCompleteVector(fullVectorFill);
         return codec.createDecoder(meta);
       } else if (codec instanceof DirectCompressCodec) {
         ColumnPageEncoderMeta meta =
             new ColumnPageEncoderMeta(spec, DataType.getDataType(metadata.getType()), stats,
                 compressor);
+        meta.setFillCompleteVector(fullVectorFill);
         return codec.createDecoder(meta);
       } else {
         throw new RuntimeException("internal error");
       }
     } else if (dataType == DataTypes.FLOAT || dataType == DataTypes.DOUBLE) {
       // create the codec based on algorithm and create decoder by recovering the metadata
-      ColumnPageCodec codec = DefaultEncodingFactory.selectCodecByAlgorithmForFloating(stats);
+      ColumnPageCodec codec =
+          DefaultEncodingFactory.selectCodecByAlgorithmForFloating(stats, false, spec);
       if (codec instanceof AdaptiveFloatingCodec) {
         AdaptiveFloatingCodec adaptiveCodec = (AdaptiveFloatingCodec) codec;
         ColumnPageEncoderMeta meta =
             new ColumnPageEncoderMeta(spec, adaptiveCodec.getTargetDataType(), stats, compressor);
+        meta.setFillCompleteVector(fullVectorFill);
         return codec.createDecoder(meta);
       } else if (codec instanceof DirectCompressCodec) {
         ColumnPageEncoderMeta meta =
             new ColumnPageEncoderMeta(spec, DataType.getDataType(metadata.getType()), stats,
                 compressor);
+        meta.setFillCompleteVector(fullVectorFill);
         return codec.createDecoder(meta);
       } else if (codec instanceof AdaptiveDeltaFloatingCodec) {
         AdaptiveDeltaFloatingCodec adaptiveCodec = (AdaptiveDeltaFloatingCodec) codec;
         ColumnPageEncoderMeta meta =
             new ColumnPageEncoderMeta(spec, adaptiveCodec.getTargetDataType(), stats, compressor);
+        meta.setFillCompleteVector(fullVectorFill);
         return codec.createDecoder(meta);
       } else {
         throw new RuntimeException("internal error");
       }
     } else if (DataTypes.isDecimal(dataType) || dataType == DataTypes.BYTE_ARRAY) {
       // no dictionary dimension
-      return new DirectCompressCodec(stats.getDataType())
-          .createDecoder(new ColumnPageEncoderMeta(spec, stats.getDataType(), stats, compressor));
+      ColumnPageEncoderMeta meta =
+          new ColumnPageEncoderMeta(spec, stats.getDataType(), stats, compressor);
+      meta.setFillCompleteVector(fullVectorFill);
+      return new DirectCompressCodec(stats.getDataType()).createDecoder(meta);
     } else if (dataType == DataTypes.LEGACY_LONG) {
       // In case of older versions like in V1 format it has special datatype to handle
       AdaptiveIntegralCodec adaptiveCodec =
-          new AdaptiveIntegralCodec(DataTypes.LONG, DataTypes.LONG, stats);
+          new AdaptiveIntegralCodec(DataTypes.LONG, DataTypes.LONG, stats, false);
       ColumnPageEncoderMeta meta =
           new ColumnPageEncoderMeta(spec, adaptiveCodec.getTargetDataType(), stats, compressor);
+      meta.setFillCompleteVector(fullVectorFill);
       return adaptiveCodec.createDecoder(meta);
     } else {
       throw new RuntimeException("unsupported data type: " + stats.getDataType());

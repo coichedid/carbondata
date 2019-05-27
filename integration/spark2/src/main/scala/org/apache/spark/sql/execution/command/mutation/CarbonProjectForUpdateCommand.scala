@@ -30,7 +30,9 @@ import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.datamap.Segment
 import org.apache.carbondata.core.exception.ConcurrentOperationException
+import org.apache.carbondata.core.features.TableOperation
 import org.apache.carbondata.core.locks.{CarbonLockFactory, CarbonLockUtil, LockUsage}
+import org.apache.carbondata.core.metadata.schema.table.CarbonTable
 import org.apache.carbondata.core.mutate.CarbonUpdateUtil
 import org.apache.carbondata.core.statusmanager.SegmentStatusManager
 import org.apache.carbondata.core.util.CarbonProperties
@@ -40,7 +42,8 @@ import org.apache.carbondata.processing.loading.FailureCauses
 private[sql] case class CarbonProjectForUpdateCommand(
     plan: LogicalPlan,
     databaseNameOp: Option[String],
-    tableName: String)
+    tableName: String,
+    columns: List[String])
   extends DataCommand {
 
   override def processData(sparkSession: SparkSession): Seq[Row] = {
@@ -57,11 +60,28 @@ private[sql] case class CarbonProjectForUpdateCommand(
       return Seq.empty
     }
     val carbonTable = CarbonEnv.getCarbonTable(databaseNameOp, tableName)(sparkSession)
-    if (carbonTable.getTableInfo.isUnManagedTable) {
-      throw new MalformedCarbonCommandException("Unsupported operation on unmanaged table")
+    setAuditTable(carbonTable)
+    setAuditInfo(Map("plan" -> plan.simpleString))
+    columns.foreach { col =>
+      val dataType = carbonTable.getColumnByName(tableName, col).getColumnSchema.getDataType
+      if (dataType.isComplexType) {
+        throw new UnsupportedOperationException("Unsupported operation on Complex data type")
+      }
+
+    }
+    if (!carbonTable.getTableInfo.isTransactionalTable) {
+      throw new MalformedCarbonCommandException("Unsupported operation on non transactional table")
+    }
+    if (SegmentStatusManager.isCompactionInProgress(carbonTable)) {
+      throw new ConcurrentOperationException(carbonTable, "compaction", "data update")
     }
     if (SegmentStatusManager.isLoadInProgressInTable(carbonTable)) {
       throw new ConcurrentOperationException(carbonTable, "loading", "data update")
+    }
+
+    if (!carbonTable.canAllow(carbonTable, TableOperation.UPDATE)) {
+      throw new MalformedCarbonCommandException(
+        "update operation is not supported for index datamap")
     }
 
     // trigger event for Update table
@@ -145,7 +165,7 @@ private[sql] case class CarbonProjectForUpdateCommand(
         CarbonUpdateUtil.cleanStaleDeltaFiles(carbonTable, e.compactionTimeStamp.toString)
 
       case e: Exception =>
-        LOGGER.error(e, "Exception in update operation")
+        LOGGER.error("Exception in update operation", e)
         // ****** start clean up.
         // In case of failure , clean all related delete delta files
         CarbonUpdateUtil.cleanStaleDeltaFiles(carbonTable, currentTime + "")
@@ -258,4 +278,6 @@ private[sql] case class CarbonProjectForUpdateCommand(
     Seq.empty
 
   }
+
+  override protected def opName: String = "UPDATE DATA"
 }

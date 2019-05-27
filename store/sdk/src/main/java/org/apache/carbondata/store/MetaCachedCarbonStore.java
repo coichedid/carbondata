@@ -22,10 +22,15 @@ import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.carbondata.common.annotations.InterfaceAudience;
+import org.apache.carbondata.core.datastore.impl.FileFactory;
+import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier;
+import org.apache.carbondata.core.metadata.converter.SchemaConverter;
+import org.apache.carbondata.core.metadata.converter.ThriftWrapperSchemaConverterImpl;
+import org.apache.carbondata.core.metadata.schema.SchemaReader;
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable;
 import org.apache.carbondata.core.metadata.schema.table.TableInfo;
+import org.apache.carbondata.core.util.CarbonUtil;
 import org.apache.carbondata.core.util.path.CarbonTablePath;
-import org.apache.carbondata.sdk.file.CarbonReader;
 
 /**
  * A CarbonStore base class that caches CarbonTable object
@@ -40,9 +45,18 @@ abstract class MetaCachedCarbonStore implements CarbonStore {
     if (cache.containsKey(path)) {
       return cache.get(path);
     }
-    TableInfo schema = CarbonReader.readSchemaFile(CarbonTablePath.getSchemaFilePath(path));
-    schema.setTablePath(path);
-    CarbonTable table = CarbonTable.buildFromTableInfo(schema);
+    String schemaPath = CarbonTablePath.getSchemaFilePath(path);
+    TableInfo tableInfo;
+    if (!FileFactory.isFileExist(schemaPath, FileFactory.getFileType(schemaPath))) {
+      tableInfo = SchemaReader.inferSchema(AbsoluteTableIdentifier.from(path), false);
+    } else {
+      org.apache.carbondata.format.TableInfo tableInfoFormat;
+      tableInfoFormat = CarbonUtil.readSchemaFile(CarbonTablePath.getSchemaFilePath(path));
+      SchemaConverter schemaConverter = new ThriftWrapperSchemaConverterImpl();
+      tableInfo = schemaConverter.fromExternalToWrapperTableInfo(tableInfoFormat, "", "", "");
+      tableInfo.setTablePath(path);
+    }
+    CarbonTable table = CarbonTable.buildFromTableInfo(tableInfo);
     cache.put(path, table);
     return table;
   }

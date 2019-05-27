@@ -20,9 +20,7 @@ package org.apache.spark.sql.execution.command.mutation
 import java.util
 
 import scala.collection.JavaConverters._
-import scala.reflect.ClassTag
 
-import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapred.JobConf
 import org.apache.hadoop.mapreduce.Job
@@ -32,15 +30,17 @@ import org.apache.spark.sql.{CarbonEnv, Row, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.execution.command.ExecutionErrors
 import org.apache.spark.sql.optimizer.CarbonFilters
+import org.apache.spark.sql.util.SparkSQLUtil
 
-import org.apache.carbondata.common.logging.{LogService, LogServiceFactory}
+import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.datamap.Segment
 import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier
 import org.apache.carbondata.core.mutate.{CarbonUpdateUtil, DeleteDeltaBlockDetails, SegmentUpdateDetails, TupleIdEnum}
 import org.apache.carbondata.core.mutate.data.RowCountDetailsVO
-import org.apache.carbondata.core.statusmanager.{SegmentStatus, SegmentUpdateStatusManager}
+import org.apache.carbondata.core.statusmanager.{SegmentStatus, SegmentStatusManager, SegmentUpdateStatusManager}
+import org.apache.carbondata.core.util.{CarbonUtil, ThreadLocalSessionInfo}
 import org.apache.carbondata.core.util.path.CarbonTablePath
 import org.apache.carbondata.core.writer.CarbonDeleteDeltaWriterImpl
 import org.apache.carbondata.hadoop.api.{CarbonInputFormat, CarbonTableInputFormat}
@@ -49,7 +49,7 @@ import org.apache.carbondata.processing.loading.FailureCauses
 import org.apache.carbondata.spark.DeleteDelataResultImpl
 
 object DeleteExecution {
-  val LOGGER: LogService = LogServiceFactory.getLogService(this.getClass.getName)
+  val LOGGER = LogServiceFactory.getLogService(this.getClass.getName)
 
   /**
    * generate the delete delta files in each segment as per the RDD.
@@ -68,12 +68,7 @@ object DeleteExecution {
     val database = CarbonEnv.getDatabaseName(databaseNameOp)(sparkSession)
     val carbonTable = CarbonEnv.getCarbonTable(databaseNameOp, tableName)(sparkSession)
     val absoluteTableIdentifier = carbonTable.getAbsoluteTableIdentifier
-    val isPartitionTable = carbonTable.isHivePartitionTable
-    val factPath = if (isPartitionTable) {
-      absoluteTableIdentifier.getTablePath
-    } else {
-      CarbonTablePath.getFactDir(absoluteTableIdentifier.getTablePath)
-    }
+    val tablePath = absoluteTableIdentifier.getTablePath
     var segmentsTobeDeleted = Seq.empty[Segment]
 
     val deleteRdd = if (isUpdateOperation) {
@@ -114,29 +109,35 @@ object DeleteExecution {
     CarbonUpdateUtil
       .createBlockDetailsMap(blockMappingVO, segmentUpdateStatusMngr)
 
+    val metadataDetails = SegmentStatusManager.readTableStatusFile(
+      CarbonTablePath.getTableStatusFilePath(carbonTable.getTablePath))
+    val isStandardTable = CarbonUtil.isStandardCarbonTable(carbonTable)
     val rowContRdd =
       sparkSession.sparkContext.parallelize(
         blockMappingVO.getCompleteBlockRowDetailVO.asScala.toSeq,
         keyRdd.partitions.length)
 
+    val conf = SparkSQLUtil
+      .broadCastHadoopConf(sparkSession.sparkContext, sparkSession.sessionState.newHadoopConf())
     val rdd = rowContRdd.join(keyRdd)
     res = rdd.mapPartitionsWithIndex(
       (index: Int, records: Iterator[((String), (RowCountDetailsVO, Iterable[Row]))]) =>
         Iterator[List[(SegmentStatus, (SegmentUpdateDetails, ExecutionErrors))]] {
-
+          ThreadLocalSessionInfo.setConfigurationToCurrentThread(conf.value.value)
           var result = List[(SegmentStatus, (SegmentUpdateDetails, ExecutionErrors))]()
           while (records.hasNext) {
             val ((key), (rowCountDetailsVO, groupedRows)) = records.next
+            val segmentId = key.substring(0, key.indexOf(CarbonCommonConstants.FILE_SEPARATOR))
             result = result ++
                      deleteDeltaFunc(index,
                        key,
                        groupedRows.toIterator,
                        timestamp,
-                       rowCountDetailsVO)
+                       rowCountDetailsVO,
+                       isStandardTable)
           }
           result
-        }
-    ).collect()
+        }).collect()
 
     // if no loads are present then no need to do anything.
     if (res.flatten.isEmpty) {
@@ -154,17 +155,15 @@ object DeleteExecution {
         resultOfBlock => {
           if (resultOfBlock._1 == SegmentStatus.SUCCESS) {
             blockUpdateDetailsList.add(resultOfBlock._2._1)
-            segmentDetails.add(new Segment(resultOfBlock._2._1.getSegmentName, null))
+            segmentDetails.add(new Segment(resultOfBlock._2._1.getSegmentName))
             // if this block is invalid then decrement block count in map.
             if (CarbonUpdateUtil.isBlockInvalid(resultOfBlock._2._1.getSegmentStatus)) {
               CarbonUpdateUtil.decrementDeletedBlockCount(resultOfBlock._2._1,
                 blockMappingVO.getSegmentNumberOfBlockMapping)
             }
-          }
-          else {
+          } else {
             // In case of failure , clean all related delete delta files
             CarbonUpdateUtil.cleanStaleDeltaFiles(carbonTable, timestamp)
-            LOGGER.audit(s"Delete data operation is failed for ${ database }.${ tableName }")
             val errorMsg =
               "Delete data operation is failed due to failure in creating delete delta file for " +
               "segment : " + resultOfBlock._2._1.getSegmentName + " block : " +
@@ -199,19 +198,14 @@ object DeleteExecution {
               listOfSegmentToBeMarkedDeleted)
       ) {
         LOGGER.info(s"Delete data operation is successful for ${ database }.${ tableName }")
-        LOGGER.audit(s"Delete data operation is successful for ${ database }.${ tableName }")
-      }
-      else {
+      } else {
         // In case of failure , clean all related delete delta files
         CarbonUpdateUtil.cleanStaleDeltaFiles(carbonTable, timestamp)
-
         val errorMessage = "Delete data operation is failed due to failure " +
                            "in table status updation."
-        LOGGER.audit(s"Delete data operation is failed for ${ database }.${ tableName }")
         LOGGER.error("Delete data operation is failed due to failure in table status updation.")
         executorErrors.failureCauses = FailureCauses.STATUS_FILE_UPDATION_FAILURE
         executorErrors.errorMsg = errorMessage
-        // throw new Exception(errorMessage)
       }
     }
 
@@ -219,7 +213,8 @@ object DeleteExecution {
         key: String,
         iter: Iterator[Row],
         timestamp: String,
-        rowCountDetailsVO: RowCountDetailsVO
+        rowCountDetailsVO: RowCountDetailsVO,
+        isStandardTable: Boolean
     ): Iterator[(SegmentStatus, (SegmentUpdateDetails, ExecutionErrors))] = {
 
       val result = new DeleteDelataResultImpl()
@@ -255,7 +250,8 @@ object DeleteExecution {
             countOfRows = countOfRows + 1
           }
 
-          val blockPath = CarbonUpdateUtil.getTableBlockPath(TID, factPath, isPartitionTable)
+          val blockPath =
+            CarbonUpdateUtil.getTableBlockPath(TID, tablePath, isStandardTable)
           val completeBlockName = CarbonTablePath
             .addDataPartPrefix(CarbonUpdateUtil.getRequiredFieldFromTID(TID, TupleIdEnum.BLOCK_ID) +
                                CarbonCommonConstants.FACT_FILE_EXT)
@@ -286,12 +282,10 @@ object DeleteExecution {
           deleteStatus = SegmentStatus.SUCCESS
         } catch {
           case e : MultipleMatchingException =>
-            LOGGER.audit(e.getMessage)
             LOGGER.error(e.getMessage)
           // dont throw exception here.
           case e: Exception =>
             val errorMsg = s"Delete data operation is failed for ${ database }.${ tableName }."
-            LOGGER.audit(errorMsg)
             LOGGER.error(errorMsg + e.getMessage)
             throw e
         }
@@ -323,7 +317,7 @@ object DeleteExecution {
   private def createCarbonInputFormat(absoluteTableIdentifier: AbsoluteTableIdentifier) :
   (CarbonTableInputFormat[Array[Object]], Job) = {
     val carbonInputFormat = new CarbonTableInputFormat[Array[Object]]()
-    val jobConf: JobConf = new JobConf(new Configuration)
+    val jobConf: JobConf = new JobConf(FileFactory.getConfiguration)
     val job: Job = new Job(jobConf)
     FileInputFormat.addInputPath(job, new Path(absoluteTableIdentifier.getTablePath))
     (carbonInputFormat, job)

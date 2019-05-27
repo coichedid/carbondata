@@ -20,23 +20,19 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.exception.InvalidConfigurationException;
 import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier;
 import org.apache.carbondata.core.metadata.schema.SchemaReader;
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonColumn;
-import org.apache.carbondata.core.scan.expression.Expression;
-import org.apache.carbondata.core.scan.filter.SingleTableProvider;
-import org.apache.carbondata.core.scan.filter.TableProvider;
-import org.apache.carbondata.core.scan.filter.resolver.FilterResolverIntf;
 import org.apache.carbondata.core.scan.model.QueryModel;
+import org.apache.carbondata.core.scan.model.QueryModelBuilder;
 import org.apache.carbondata.core.util.DataTypeConverterImpl;
+import org.apache.carbondata.core.util.ObjectSerializationUtil;
 import org.apache.carbondata.hadoop.CarbonInputSplit;
 import org.apache.carbondata.hadoop.api.CarbonTableInputFormat;
 import org.apache.carbondata.hadoop.readsupport.CarbonReadSupport;
-import org.apache.carbondata.hadoop.util.ObjectSerializationUtil;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.InvalidPathException;
@@ -50,12 +46,14 @@ import org.apache.hadoop.mapred.RecordReader;
 import org.apache.hadoop.mapred.Reporter;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.log4j.Logger;
 
 public class MapredCarbonInputFormat extends CarbonTableInputFormat<ArrayWritable>
     implements InputFormat<Void, ArrayWritable>, CombineHiveInputFormat.AvoidSplitCombination {
   private static final String CARBON_TABLE = "mapreduce.input.carboninputformat.table";
 
-  private LogService LOGGER = LogServiceFactory.getLogService(this.getClass().getCanonicalName());
+  private static final Logger LOGGER =
+      LogServiceFactory.getLogService(MapredCarbonInputFormat.class.getCanonicalName());
 
   /**
    * this method will read the schema from the physical file and populate into CARBON_TABLE
@@ -80,13 +78,17 @@ public class MapredCarbonInputFormat extends CarbonTableInputFormat<ArrayWritabl
         }
       }
     }
-    AbsoluteTableIdentifier absoluteTableIdentifier = AbsoluteTableIdentifier
-        .from(validInputPath, getDatabaseName(configuration), getTableName(configuration));
-    // read the schema file to get the absoluteTableIdentifier having the correct table id
-    // persisted in the schema
-    CarbonTable carbonTable = SchemaReader.readCarbonTableFromStore(absoluteTableIdentifier);
-    configuration.set(CARBON_TABLE, ObjectSerializationUtil.convertObjectToString(carbonTable));
-    setTableInfo(configuration, carbonTable.getTableInfo());
+    if (null != validInputPath) {
+      AbsoluteTableIdentifier absoluteTableIdentifier = AbsoluteTableIdentifier
+          .from(validInputPath, getDatabaseName(configuration), getTableName(configuration));
+      // read the schema file to get the absoluteTableIdentifier having the correct table id
+      // persisted in the schema
+      CarbonTable carbonTable = SchemaReader.readCarbonTableFromStore(absoluteTableIdentifier);
+      configuration.set(CARBON_TABLE, ObjectSerializationUtil.convertObjectToString(carbonTable));
+      setTableInfo(configuration, carbonTable.getTableInfo());
+    } else {
+      throw new InvalidPathException("No input paths specified in job");
+    }
   }
 
   private static CarbonTable getCarbonTable(Configuration configuration, String path)
@@ -132,22 +134,16 @@ public class MapredCarbonInputFormat extends CarbonTableInputFormat<ArrayWritabl
   private QueryModel getQueryModel(Configuration configuration, String path)
       throws IOException, InvalidConfigurationException {
     CarbonTable carbonTable = getCarbonTable(configuration, path);
-    TableProvider tableProvider = new SingleTableProvider(carbonTable);
-    // getting the table absoluteTableIdentifier from the carbonTable
-    // to avoid unnecessary deserialization
-
     AbsoluteTableIdentifier identifier = carbonTable.getAbsoluteTableIdentifier();
-
     String projectionString = getProjection(configuration, carbonTable,
         identifier.getCarbonTableIdentifier().getTableName());
     String[] projectionColumns = projectionString.split(",");
-    QueryModel queryModel = carbonTable.createQueryWithProjection(
-        projectionColumns, new DataTypeConverterImpl());
-    // set the filter to the query model in order to filter blocklet before scan
-    Expression filter = getFilterPredicates(configuration);
-    carbonTable.processFilterExpression(filter, null, null);
-    FilterResolverIntf filterIntf = carbonTable.resolveFilter(filter, tableProvider);
-    queryModel.setFilterExpressionResolverTree(filterIntf);
+    QueryModel queryModel =
+        new QueryModelBuilder(carbonTable)
+            .projectColumns(projectionColumns)
+            .filterExpression(getFilterPredicates(configuration))
+            .dataConverter(new DataTypeConverterImpl())
+            .build();
 
     return queryModel;
   }

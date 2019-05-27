@@ -27,7 +27,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.carbondata.common.CarbonIterator;
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.datastore.row.CarbonRow;
@@ -45,6 +44,7 @@ import org.apache.carbondata.processing.sort.sortdata.SortParameters;
 import org.apache.carbondata.processing.util.CarbonDataProcessorUtil;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.log4j.Logger;
 
 /**
  * It parallely reads data from array of iterates and do merge sort.
@@ -55,7 +55,7 @@ import org.apache.commons.lang3.StringUtils;
  */
 public class UnsafeParallelReadMergeSorterWithColumnRangeImpl extends AbstractMergeSorter {
 
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(
           UnsafeParallelReadMergeSorterWithColumnRangeImpl.class.getName());
 
@@ -143,9 +143,9 @@ public class UnsafeParallelReadMergeSorterWithColumnRangeImpl extends AbstractMe
 
   private UnsafeSingleThreadFinalSortFilesMerger getFinalMerger(SortParameters sortParameters) {
     String[] storeLocation = CarbonDataProcessorUtil
-        .getLocalDataFolderLocation(sortParameters.getDatabaseName(), sortParameters.getTableName(),
-            String.valueOf(sortParameters.getTaskNo()),
-            sortParameters.getSegmentId() + "", false, false);
+        .getLocalDataFolderLocation(sortParameters.getCarbonTable(),
+            String.valueOf(sortParameters.getTaskNo()), sortParameters.getSegmentId() + "", false,
+            false);
     // Set the data file location
     String[] dataFolderLocation = CarbonDataProcessorUtil.arrayAppend(storeLocation,
         File.separator, CarbonCommonConstants.SORT_TEMP_FILE_LOCATION);
@@ -163,14 +163,6 @@ public class UnsafeParallelReadMergeSorterWithColumnRangeImpl extends AbstractMe
    */
   private boolean processRowToNextStep(UnsafeSortDataRows[] sortDataRows, SortParameters parameters)
       throws CarbonDataLoadingException {
-    if (null == sortDataRows || sortDataRows.length == 0) {
-      LOGGER.info("Record Processed For table: " + parameters.getTableName());
-      LOGGER.info("Number of Records was Zero");
-      String logMessage = "Summary: Carbon Sort Key Step: Read: " + 0 + ": Write: " + 0;
-      LOGGER.info(logMessage);
-      return false;
-    }
-
     try {
       for (int i = 0; i < sortDataRows.length; i++) {
         // start sorting
@@ -190,12 +182,11 @@ public class UnsafeParallelReadMergeSorterWithColumnRangeImpl extends AbstractMe
 
   private void setTempLocation(SortParameters parameters) {
     String[] carbonDataDirectoryPath = CarbonDataProcessorUtil
-        .getLocalDataFolderLocation(parameters.getDatabaseName(), parameters.getTableName(),
-            parameters.getTaskNo(), parameters.getSegmentId(),
-            false, false);
+        .getLocalDataFolderLocation(parameters.getCarbonTable(), parameters.getTaskNo(),
+            parameters.getSegmentId(), false, false);
     String[] tmpLoc = CarbonDataProcessorUtil.arrayAppend(carbonDataDirectoryPath, File.separator,
         CarbonCommonConstants.SORT_TEMP_FILE_LOCATION);
-    LOGGER.error("set temp location: " + StringUtils.join(tmpLoc, ", "));
+    LOGGER.warn("set temp location: " + StringUtils.join(tmpLoc, ", "));
     parameters.setTempFileLocation(tmpLoc);
   }
 
@@ -227,7 +218,6 @@ public class UnsafeParallelReadMergeSorterWithColumnRangeImpl extends AbstractMe
       try {
         while (iterator.hasNext()) {
           CarbonRowBatch batch = iterator.next();
-          int i = 0;
           while (batch.hasNext()) {
             CarbonRow row = batch.next();
             if (row != null) {

@@ -110,7 +110,7 @@ class TestPreAggregateDrop extends QueryTest with BeforeAndAfterAll {
       sql("DROP DATAMAP not_exists_datamap ON TABLE maintable")
     }
     assert(e.getMessage.equals(
-      "Datamap with name not_exists_datamap does not exist under table maintable"))
+      "Datamap with name not_exists_datamap does not exist"))
   }
 
   test("drop datamap without 'if exists' when main table not exists") {
@@ -127,6 +127,38 @@ class TestPreAggregateDrop extends QueryTest with BeforeAndAfterAll {
       sql("DROP DATAMAP IF EXISTS preagg3 ON TABLE maintable")
     }
     assert(e.getMessage.contains("Table or view 'maintable' not found in"))
+  }
+
+  test("drop preaggregate datamap whose main table has other type datamaps") {
+    sql("drop table if exists maintable")
+    sql("create table maintable (a string, b string, c string) stored by 'carbondata'")
+    sql(
+      "create datamap bloom1 on table maintable using 'bloomfilter'" +
+      " dmproperties('index_columns'='a')")
+    sql(
+      "create datamap preagg1 on table maintable using 'preaggregate' as select" +
+      " a,sum(b) from maintable group by a")
+    sql("drop datamap if exists bloom1 on table maintable")
+    sql("drop datamap if exists preagg1 on table maintable")
+    checkExistence(sql("SHOW DATAMAP ON TABLE maintable"), false, "preagg1", "bloom1")
+    sql(
+      "create datamap bloom1 on table maintable using 'bloomfilter'" +
+      " dmproperties('index_columns'='a')")
+    sql(
+      "create datamap preagg1 on table maintable using 'preaggregate' as select" +
+      " a,sum(b) from maintable group by a")
+    sql("drop datamap if exists preagg1 on table maintable")
+    sql("drop datamap if exists bloom1 on table maintable")
+    checkExistence(sql("SHOW DATAMAP ON TABLE maintable"), false, "preagg1", "bloom1")
+    sql(
+      "create datamap bloom1 on table maintable using 'bloomfilter'" +
+      " dmproperties('index_columns'='a')")
+    sql(
+      "create datamap preagg1 on table maintable using 'preaggregate' as select" +
+      " a,sum(b) from maintable group by a")
+    sql("drop table if exists maintable")
+    checkExistence(sql("show tables"), false, "maintable_preagg1", "maintable")
+    checkExistence(sql("show datamap"), false, "preagg1", "bloom1")
   }
 
   override def afterAll() {

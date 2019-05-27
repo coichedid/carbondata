@@ -21,12 +21,13 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.TimeZone;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.keygenerator.directdictionary.DirectDictionaryGenerator;
 import org.apache.carbondata.core.metadata.datatype.DataType;
 import org.apache.carbondata.core.metadata.datatype.DataTypes;
+
+import org.apache.log4j.Logger;
 
 /**
  * The class provides the method to generate dictionary key and getting the actual value from
@@ -34,7 +35,7 @@ import org.apache.carbondata.core.metadata.datatype.DataTypes;
  */
 public class DateDirectDictionaryGenerator implements DirectDictionaryGenerator {
 
-  private static final int cutOffDate = Integer.MAX_VALUE >> 1;
+  public static final int cutOffDate = Integer.MAX_VALUE >> 1;
   private static final long SECONDS_PER_DAY = 60 * 60 * 24L;
   public static final long MILLIS_PER_DAY = SECONDS_PER_DAY * 1000L;
 
@@ -53,7 +54,7 @@ public class DateDirectDictionaryGenerator implements DirectDictionaryGenerator 
   /**
    * Logger instance
    */
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(DateDirectDictionaryGenerator.class.getName());
 
   static {
@@ -85,7 +86,7 @@ public class DateDirectDictionaryGenerator implements DirectDictionaryGenerator 
   @Override public int generateDirectSurrogateKey(String memberStr) {
     if (null == memberStr || memberStr.trim().isEmpty() || memberStr
         .equals(CarbonCommonConstants.MEMBER_DEFAULT_VAL)) {
-      return 1;
+      return CarbonCommonConstants.DIRECT_DICT_VALUE_NULL;
     }
     return getDirectSurrogateForMember(memberStr);
   }
@@ -103,7 +104,7 @@ public class DateDirectDictionaryGenerator implements DirectDictionaryGenerator 
     } else {
       if (null == memberStr || memberStr.trim().isEmpty() || memberStr
           .equals(CarbonCommonConstants.MEMBER_DEFAULT_VAL)) {
-        return 1;
+        return CarbonCommonConstants.DIRECT_DICT_VALUE_NULL;
       }
       return getDirectSurrogateForMember(memberStr);
     }
@@ -127,7 +128,7 @@ public class DateDirectDictionaryGenerator implements DirectDictionaryGenerator 
     }
     //adding +2 to reserve the first cuttOffDiff value for null or empty date
     if (null == dateToStr) {
-      return 1;
+      return CarbonCommonConstants.DIRECT_DICT_VALUE_NULL;
     } else {
       return generateKey(dateToStr.getTime());
     }
@@ -140,7 +141,7 @@ public class DateDirectDictionaryGenerator implements DirectDictionaryGenerator 
    * @return member value/actual value Date
    */
   @Override public Object getValueFromSurrogate(int key) {
-    if (key == 1) {
+    if (key == CarbonCommonConstants.DIRECT_DICT_VALUE_NULL) {
       return null;
     }
     return key - cutOffDate;
@@ -157,18 +158,18 @@ public class DateDirectDictionaryGenerator implements DirectDictionaryGenerator 
       }
     }
     if (timeValue == -1) {
-      return 1;
+      return CarbonCommonConstants.DIRECT_DICT_VALUE_NULL;
     } else {
       return generateKey(timeValue);
     }
   }
 
-  private int generateKey(long timeValue) {
+  public int generateKey(long timeValue) {
     if (timeValue < MIN_VALUE || timeValue > MAX_VALUE) {
       if (LOGGER.isDebugEnabled()) {
         LOGGER.debug("Value for date type column is not in valid range. Value considered as null.");
       }
-      return 1;
+      return CarbonCommonConstants.DIRECT_DICT_VALUE_NULL;
     }
     return (int) Math.floor((double) timeValue / MILLIS_PER_DAY) + cutOffDate;
   }

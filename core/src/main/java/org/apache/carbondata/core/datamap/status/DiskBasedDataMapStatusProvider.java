@@ -17,18 +17,23 @@
 
 package org.apache.carbondata.core.datamap.status;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.datastore.impl.FileFactory;
+import org.apache.carbondata.core.fileoperations.AtomicFileOperationFactory;
 import org.apache.carbondata.core.fileoperations.AtomicFileOperations;
-import org.apache.carbondata.core.fileoperations.AtomicFileOperationsImpl;
 import org.apache.carbondata.core.fileoperations.FileWriteOperation;
 import org.apache.carbondata.core.locks.CarbonLockFactory;
 import org.apache.carbondata.core.locks.CarbonLockUtil;
@@ -39,6 +44,7 @@ import org.apache.carbondata.core.util.CarbonProperties;
 import org.apache.carbondata.core.util.CarbonUtil;
 
 import com.google.gson.Gson;
+import org.apache.log4j.Logger;
 
 /**
  * It saves/serializes the array of {{@link DataMapStatusDetail}} to disk in json format.
@@ -47,7 +53,7 @@ import com.google.gson.Gson;
  */
 public class DiskBasedDataMapStatusProvider implements DataMapStatusStorageProvider {
 
-  private static final LogService LOG =
+  private static final Logger LOG =
       LogServiceFactory.getLogService(DiskBasedDataMapStatusProvider.class.getName());
 
   private static final String DATAMAP_STATUS_FILE = "datamapstatus";
@@ -72,7 +78,7 @@ public class DiskBasedDataMapStatusProvider implements DataMapStatusStorageProvi
       buffReader = new BufferedReader(inStream);
       dataMapStatusDetails = gsonObjectToRead.fromJson(buffReader, DataMapStatusDetail[].class);
     } catch (IOException e) {
-      LOG.error(e, "Failed to read datamap status");
+      LOG.error("Failed to read datamap status", e);
       throw e;
     } finally {
       CarbonUtil.closeStreams(buffReader, inStream, dataInputStream);
@@ -98,6 +104,10 @@ public class DiskBasedDataMapStatusProvider implements DataMapStatusStorageProvi
   @Override
   public void updateDataMapStatus(List<DataMapSchema> dataMapSchemas, DataMapStatus dataMapStatus)
       throws IOException {
+    if (dataMapSchemas == null || dataMapSchemas.size() == 0) {
+      // There is nothing to update
+      return;
+    }
     ICarbonLock carbonTableStatusLock = getDataMapStatusLock();
     boolean locked = false;
     try {
@@ -137,7 +147,6 @@ public class DiskBasedDataMapStatusProvider implements DataMapStatusStorageProvi
       } else {
         String errorMsg = "Upadating datamapstatus is failed due to another process taken the lock"
             + " for updating it";
-        LOG.audit(errorMsg);
         LOG.error(errorMsg);
         throw new IOException(errorMsg + " Please try after some time.");
       }
@@ -156,8 +165,7 @@ public class DiskBasedDataMapStatusProvider implements DataMapStatusStorageProvi
    */
   private static void writeLoadDetailsIntoFile(String location,
       DataMapStatusDetail[] dataMapStatusDetails) throws IOException {
-    AtomicFileOperations fileWrite =
-        new AtomicFileOperationsImpl(location, FileFactory.getFileType(location));
+    AtomicFileOperations fileWrite = AtomicFileOperationFactory.getAtomicFileOperations(location);
     BufferedWriter brWriter = null;
     DataOutputStream dataOutputStream = null;
     Gson gsonObjectToWrite = new Gson();
@@ -171,6 +179,7 @@ public class DiskBasedDataMapStatusProvider implements DataMapStatusStorageProvi
       brWriter.write(metadataInstance);
     } catch (IOException ioe) {
       LOG.error("Error message: " + ioe.getLocalizedMessage());
+      fileWrite.setFailed();
       throw ioe;
     } finally {
       if (null != brWriter) {
@@ -184,7 +193,7 @@ public class DiskBasedDataMapStatusProvider implements DataMapStatusStorageProvi
 
   private static ICarbonLock getDataMapStatusLock() {
     return CarbonLockFactory
-        .getCarbonLockObj(CarbonProperties.getInstance().getSystemFolderLocation(),
+        .getSystemLevelCarbonLockObj(CarbonProperties.getInstance().getSystemFolderLocation(),
             LockUsage.DATAMAP_STATUS_LOCK);
   }
 }

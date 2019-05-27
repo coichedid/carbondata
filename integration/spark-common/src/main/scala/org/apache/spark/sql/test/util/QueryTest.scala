@@ -53,7 +53,7 @@ class QueryTest extends PlanTest {
    * @param keywords keyword in string array
    */
   def checkExistence(df: DataFrame, exists: Boolean, keywords: String*) {
-    val outputs = df.collect().map(_.mkString).mkString
+    val outputs = df.collect().map(_.mkString(" ")).mkString(" ")
     for (key <- keywords) {
       if (exists) {
         assert(outputs.contains(key), s"Failed for $df ($key doesn't exist in result)")
@@ -153,6 +153,15 @@ object QueryTest {
         Row.fromSeq(s.toSeq.map {
           case d: java.math.BigDecimal => BigDecimal(d)
           case b: Array[Byte] => b.toSeq
+          case d : Double =>
+            if (!d.isInfinite && !d.isNaN) {
+              var bd = BigDecimal(d)
+              bd = bd.setScale(5, BigDecimal.RoundingMode.UP)
+              bd.doubleValue()
+            }
+            else {
+              d
+            }
           case o => o
         })
       }

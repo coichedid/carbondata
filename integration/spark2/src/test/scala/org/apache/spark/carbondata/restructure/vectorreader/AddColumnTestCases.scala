@@ -21,13 +21,14 @@ import java.io.{File, FileOutputStream, FileWriter}
 import java.math.{BigDecimal, RoundingMode}
 import java.sql.{Date, Timestamp}
 
-import org.apache.spark.sql.Row
+import org.apache.spark.sql.{CarbonEnv, Row}
 import org.apache.spark.sql.common.util.Spark2QueryTest
 import org.apache.spark.sql.test.TestQueryExecutor
 import org.scalatest.BeforeAndAfterAll
 
 import org.apache.carbondata.common.exceptions.sql.MalformedCarbonCommandException
 import org.apache.carbondata.core.constants.CarbonCommonConstants
+import org.apache.carbondata.core.metadata.schema.table.CarbonTable
 import org.apache.carbondata.core.util.CarbonProperties
 import org.apache.carbondata.spark.exception.ProcessMetaDataException
 
@@ -130,18 +131,19 @@ class AddColumnTestCases extends Spark2QueryTest with BeforeAndAfterAll {
   test("test compaction after adding new column") {
     sqlContext.setConf("carbon.enable.vector.reader", "true")
     sql("ALTER TABLE addcolumntest COMPACT 'major'")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "0Compacted")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "1Compacted")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "0.1Success")
+    sql("SHOW SEGMENTS FOR TABLE addcolumntest").show(100, false)
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "0 Compacted")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "1 Compacted")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "0.1 Success")
     checkAnswer(sql("SELECT charField FROM addcolumntest"), Seq(Row("abc"), Row("def")))
 
     afterAll
     beforeAll
     sqlContext.setConf("carbon.enable.vector.reader", "false")
     sql("ALTER TABLE addcolumntest COMPACT 'major'")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "0Compacted")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "1Compacted")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "0.1Success")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "0 Compacted")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "1 Compacted")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE addcolumntest"), true, "0.1 Success")
     checkAnswer(sql("SELECT charField FROM addcolumntest"), Seq(Row("abc"), Row("def")))
   }
 
@@ -253,7 +255,7 @@ class AddColumnTestCases extends Spark2QueryTest with BeforeAndAfterAll {
       assert(true)
     }
     catch {
-      case _ => assert(false)
+      case _: Throwable => assert(false)
     }
   }
 
@@ -562,9 +564,9 @@ class AddColumnTestCases extends Spark2QueryTest with BeforeAndAfterAll {
     sql("ALTER TABLE alter_dict DROP COLUMNS(charField)")
     sql(s"LOAD DATA LOCAL INPATH '$resourcesPath/restructure/data7.csv' INTO TABLE alter_dict OPTIONS('FILEHEADER'='stringField')")
     sql("ALTER TABLE alter_dict COMPACT 'major'")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_dict"), true, "0Compacted")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_dict"), true, "1Compacted")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_dict"), true, "0.1Success")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_dict"), true, "0 Compacted")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_dict"), true, "1 Compacted")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_dict"), true, "0.1 Success")
     sql("DROP TABLE IF EXISTS alter_dict")
   }
 
@@ -589,9 +591,9 @@ class AddColumnTestCases extends Spark2QueryTest with BeforeAndAfterAll {
     sql("ALTER TABLE alter_no_dict DROP COLUMNS(charField)")
     sql(s"LOAD DATA LOCAL INPATH '$resourcesPath/restructure/data7.csv' INTO TABLE alter_no_dict OPTIONS('FILEHEADER'='stringField')")
     sql("ALTER TABLE alter_no_dict COMPACT 'major'")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_no_dict"), true, "0Compacted")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_no_dict"), true, "1Compacted")
-    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_no_dict"), true, "0.1Success")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_no_dict"), true, "0 Compacted")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_no_dict"), true, "1 Compacted")
+    checkExistence(sql("SHOW SEGMENTS FOR TABLE alter_no_dict"), true, "0.1 Success")
     sql("DROP TABLE IF EXISTS alter_no_dict")
   }
 
@@ -640,7 +642,22 @@ class AddColumnTestCases extends Spark2QueryTest with BeforeAndAfterAll {
       """)
 
     sql("alter table NO_INVERTED_CARBON add columns(col1 string,col2 string) tblproperties('NO_INVERTED_INDEX'='col2')")
-    checkExistenceCount(sql("desc formatted NO_INVERTED_CARBON"),2,"NOINVERTEDINDEX")
+    checkExistence(sql("desc formatted NO_INVERTED_CARBON"),false,"Inverted Index Columns name, col1")
+  }
+
+  test("inverted index after alter command") {
+    sql("drop table if exists NO_INVERTED_CARBON")
+    sql(
+      """
+           CREATE TABLE IF NOT EXISTS NO_INVERTED_CARBON
+           (id Int, name String, city String)
+           STORED BY 'org.apache.carbondata.format'
+           TBLPROPERTIES('INVERTED_INDEX'='city')
+      """)
+
+    sql("alter table NO_INVERTED_CARBON add columns(col1 string,col2 string) tblproperties('INVERTED_INDEX'='col2')")
+    val df = sql("describe formatted NO_INVERTED_CARBON")
+    checkExistence(df, true, "Inverted Index Columns city, col2")
   }
 
   test("test if adding column in pre-aggregate table throws exception") {
@@ -679,6 +696,9 @@ class AddColumnTestCases extends Spark2QueryTest with BeforeAndAfterAll {
     sql("alter table t5 rename to t6")
     sql("create table t5 (c1 string, c2 int,c3 string) stored by 'carbondata'")
     sql("insert into t5 select 'asd',1,'sdf'")
+    val t5: CarbonTable = CarbonEnv.getCarbonTable(None, "t5")(sqlContext.sparkSession)
+    assert(t5.getTablePath
+      .contains(t5.getAbsoluteTableIdentifier.getCarbonTableIdentifier.getTableId))
     checkAnswer(sql("select * from t5"),Seq(Row("asd",1,"sdf")))
   }
 

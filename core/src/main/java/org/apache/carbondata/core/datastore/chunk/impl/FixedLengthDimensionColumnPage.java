@@ -21,7 +21,6 @@ import org.apache.carbondata.core.datastore.chunk.store.DimensionChunkStoreFacto
 import org.apache.carbondata.core.datastore.chunk.store.DimensionChunkStoreFactory.DimensionStoreType;
 import org.apache.carbondata.core.metadata.datatype.DataType;
 import org.apache.carbondata.core.metadata.datatype.DataTypes;
-import org.apache.carbondata.core.scan.executor.infos.KeyStructureInfo;
 import org.apache.carbondata.core.scan.result.vector.CarbonColumnVector;
 import org.apache.carbondata.core.scan.result.vector.ColumnVectorInfo;
 
@@ -40,14 +39,42 @@ public class FixedLengthDimensionColumnPage extends AbstractDimensionColumnPage 
    * @param columnValueSize      size of each column value
    */
   public FixedLengthDimensionColumnPage(byte[] dataChunk, int[] invertedIndex,
-      int[] invertedIndexReverse, int numberOfRows, int columnValueSize) {
-    long totalSize = null != invertedIndex ?
-        dataChunk.length + (2 * numberOfRows * CarbonCommonConstants.INT_SIZE_IN_BYTE) :
-        dataChunk.length;
+      int[] invertedIndexReverse, int numberOfRows, int columnValueSize, int dataLength) {
+    boolean isExplicitSorted = isExplicitSorted(invertedIndex);
+    long totalSize = isExplicitSorted ?
+        dataLength + (2 * numberOfRows * CarbonCommonConstants.INT_SIZE_IN_BYTE) :
+        dataLength;
     dataChunkStore = DimensionChunkStoreFactory.INSTANCE
-        .getDimensionChunkStore(columnValueSize, null != invertedIndex, numberOfRows, totalSize,
-            DimensionStoreType.FIXEDLENGTH);
+        .getDimensionChunkStore(columnValueSize, isExplicitSorted, numberOfRows, totalSize,
+            DimensionStoreType.FIXED_LENGTH, null, false, dataLength);
     dataChunkStore.putArray(invertedIndex, invertedIndexReverse, dataChunk);
+  }
+
+  /**
+   * Constructor
+   *
+   * @param dataChunk            data chunk
+   * @param invertedIndex        inverted index
+   * @param invertedIndexReverse reverse inverted index
+   * @param numberOfRows         number of rows
+   * @param columnValueSize      size of each column value
+   * @param vectorInfo           vector to be filled with decoded column page.
+   */
+  public FixedLengthDimensionColumnPage(byte[] dataChunk, int[] invertedIndex,
+      int[] invertedIndexReverse, int numberOfRows, int columnValueSize,
+      ColumnVectorInfo vectorInfo, int dataLength) {
+    boolean isExplicitSorted = isExplicitSorted(invertedIndex);
+    long totalSize = isExplicitSorted ?
+        dataLength + (2 * numberOfRows * CarbonCommonConstants.INT_SIZE_IN_BYTE) :
+        dataLength;
+    dataChunkStore = DimensionChunkStoreFactory.INSTANCE
+        .getDimensionChunkStore(columnValueSize, isExplicitSorted, numberOfRows, totalSize,
+            DimensionStoreType.FIXED_LENGTH, null, vectorInfo != null, dataLength);
+    if (vectorInfo == null) {
+      dataChunkStore.putArray(invertedIndex, invertedIndexReverse, dataChunk);
+    } else {
+      dataChunkStore.fillVector(invertedIndex, invertedIndexReverse, dataChunk, vectorInfo);
+    }
   }
 
   /**
@@ -56,11 +83,9 @@ public class FixedLengthDimensionColumnPage extends AbstractDimensionColumnPage 
    * @param rowId            row id of the chunk
    * @param offset           offset from which data need to be filed
    * @param data             data to filed
-   * @param keyStructureInfo define the structure of the key
    * @return how many bytes was copied
    */
-  @Override public int fillRawData(int rowId, int offset, byte[] data,
-      KeyStructureInfo keyStructureInfo) {
+  @Override public int fillRawData(int rowId, int offset, byte[] data) {
     dataChunkStore.fillRow(rowId, data, offset);
     return dataChunkStore.getColumnValueSize();
   }
@@ -71,11 +96,9 @@ public class FixedLengthDimensionColumnPage extends AbstractDimensionColumnPage 
    * @param rowId
    * @param chunkIndex
    * @param outputSurrogateKey
-   * @param restructuringInfo
    * @return
    */
-  @Override public int fillSurrogateKey(int rowId, int chunkIndex, int[] outputSurrogateKey,
-      KeyStructureInfo restructuringInfo) {
+  @Override public int fillSurrogateKey(int rowId, int chunkIndex, int[] outputSurrogateKey) {
     outputSurrogateKey[chunkIndex] = dataChunkStore.getSurrogate(rowId);
     return chunkIndex + 1;
   }
@@ -85,11 +108,9 @@ public class FixedLengthDimensionColumnPage extends AbstractDimensionColumnPage 
    *
    * @param vectorInfo
    * @param chunkIndex
-   * @param restructuringInfo
    * @return next column index
    */
-  @Override public int fillVector(ColumnVectorInfo[] vectorInfo, int chunkIndex,
-      KeyStructureInfo restructuringInfo) {
+  @Override public int fillVector(ColumnVectorInfo[] vectorInfo, int chunkIndex) {
     ColumnVectorInfo columnVectorInfo = vectorInfo[chunkIndex];
     int offset = columnVectorInfo.offset;
     int vectorOffset = columnVectorInfo.vectorOffset;
@@ -126,11 +147,10 @@ public class FixedLengthDimensionColumnPage extends AbstractDimensionColumnPage 
    * @param filteredRowId
    * @param vectorInfo
    * @param chunkIndex
-   * @param restructuringInfo
    * @return next column index
    */
   @Override public int fillVector(int[] filteredRowId, ColumnVectorInfo[] vectorInfo,
-      int chunkIndex, KeyStructureInfo restructuringInfo) {
+      int chunkIndex) {
     ColumnVectorInfo columnVectorInfo = vectorInfo[chunkIndex];
     int offset = columnVectorInfo.offset;
     int vectorOffset = columnVectorInfo.vectorOffset;

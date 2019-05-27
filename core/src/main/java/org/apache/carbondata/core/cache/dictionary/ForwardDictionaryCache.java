@@ -19,16 +19,15 @@ package org.apache.carbondata.core.cache.dictionary;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.cache.CacheType;
 import org.apache.carbondata.core.cache.CarbonLRUCache;
@@ -36,6 +35,8 @@ import org.apache.carbondata.core.reader.CarbonDictionaryColumnMetaChunk;
 import org.apache.carbondata.core.util.CarbonUtil;
 import org.apache.carbondata.core.util.ObjectSizeCalculator;
 import org.apache.carbondata.core.util.TaskMetricsMap;
+
+import org.apache.log4j.Logger;
 
 /**
  * This class implements methods to create dictionary cache which will hold
@@ -47,11 +48,11 @@ public class ForwardDictionaryCache<K extends
   /**
    * Attribute for Carbon LOGGER
    */
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(ForwardDictionaryCache.class.getName());
 
   private static final Map<DictionaryColumnUniqueIdentifier, Object> DICTIONARY_LOCK_OBJECT =
-      new HashMap<>();
+      new ConcurrentHashMap<>();
 
   private static final long sizeOfEmptyDictChunks =
       ObjectSizeCalculator.estimate(new ArrayList<byte[]>(CarbonUtil.getDictionaryChunkSize()), 16);

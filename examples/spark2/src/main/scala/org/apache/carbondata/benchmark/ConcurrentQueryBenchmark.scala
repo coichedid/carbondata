@@ -26,10 +26,10 @@ import java.util.concurrent.{Callable, Executors, Future, TimeUnit}
 import scala.util.Random
 
 import org.apache.spark.sql.{DataFrame, Row, SaveMode, SparkSession}
-import org.apache.spark.sql.types._
 
 import org.apache.carbondata.core.constants.{CarbonCommonConstants, CarbonVersionConstants}
 import org.apache.carbondata.core.util.{CarbonProperties, CarbonUtil}
+import org.apache.carbondata.spark.util.DataGenerator
 
 // scalastyle:off println
 /**
@@ -54,13 +54,14 @@ import org.apache.carbondata.core.util.{CarbonProperties, CarbonUtil}
  * --executor-memory 24g \
  * --num-executors 3  \
  * concurrencyTest.jar \
- * totalNum threadNum taskNum resultIsEmpty runInLocal generateFile deleteFile
+ * totalNum threadNum taskNum resultIsEmpty runInLocal generateFile
+ * deleteFile openSearchMode storeLocation
  * details in initParameters method of this benchmark
  */
 object ConcurrentQueryBenchmark {
 
   // generate number of data
-  var totalNum = 1 * 10 * 1000
+  var totalNum = 10 * 1000 * 1000
   // the number of thread pool
   var threadNum = 16
   // task number of spark sql query
@@ -75,6 +76,8 @@ object ConcurrentQueryBenchmark {
   var generateFile = true
   // whether delete file
   var deleteFile = true
+  // carbon store location
+  var storeLocation = "/tmp"
 
   val cardinalityId = 100 * 1000 * 1000
   val cardinalityCity = 6
@@ -234,13 +237,12 @@ object ConcurrentQueryBenchmark {
     } else {
       null
     }
-
     val table1Time = time {
       if (table1.endsWith("parquet")) {
         if (generateFile) {
-          generateParquetTable(spark, df, table1)
+          generateParquetTable(spark, df, storeLocation + "/" + table1)
         }
-        spark.read.parquet(table1).createOrReplaceTempView(table1)
+        spark.read.parquet(storeLocation + "/" + table1).createOrReplaceTempView(table1)
       } else if (table1.endsWith("orc")) {
         if (generateFile) {
           generateOrcTable(spark, df, table1)
@@ -468,6 +470,9 @@ object ConcurrentQueryBenchmark {
     }
     if (arr.length > 5) {
       runInLocal = if (arr(5).equalsIgnoreCase("true")) {
+        val rootPath = new File(this.getClass.getResource("/").getPath
+          + "../../../..").getCanonicalPath
+        storeLocation = s"$rootPath/examples/spark2/target/store"
         true
       } else if (arr(5).equalsIgnoreCase("false")) {
         false
@@ -493,6 +498,9 @@ object ConcurrentQueryBenchmark {
         throw new Exception("error parameter, should be true or false")
       }
     }
+    if (arr.length > 8) {
+      storeLocation = arr(8)
+    }
   }
 
   /**
@@ -505,7 +513,8 @@ object ConcurrentQueryBenchmark {
       .addProperty("carbon.enable.vector.reader", "true")
       .addProperty("enable.unsafe.sort", "true")
       .addProperty("carbon.blockletgroup.size.in.mb", "32")
-      .addProperty(CarbonCommonConstants.ENABLE_UNSAFE_COLUMN_PAGE, "true")
+      .addProperty(CarbonCommonConstants.ENABLE_UNSAFE_COLUMN_PAGE, "false")
+      .addProperty(CarbonCommonConstants.ENABLE_UNSAFE_IN_QUERY_EXECUTION, "false")
     import org.apache.spark.sql.CarbonSession._
 
     // 1. initParameters
@@ -519,12 +528,10 @@ object ConcurrentQueryBenchmark {
       "\tfile path: " + path +
       "\trunInLocal: " + runInLocal +
       "\tgenerateFile: " + generateFile +
-      "\tdeleteFile: " + deleteFile
+      "\tdeleteFile: " + deleteFile +
+      "\tstoreLocation: " + storeLocation
 
     val spark = if (runInLocal) {
-      val rootPath = new File(this.getClass.getResource("/").getPath
-        + "../../../..").getCanonicalPath
-      val storeLocation = s"$rootPath/examples/spark2/target/store"
       SparkSession
         .builder()
         .appName(parameters)
@@ -536,10 +543,9 @@ object ConcurrentQueryBenchmark {
         .builder()
         .appName(parameters)
         .enableHiveSupport()
-        .getOrCreateCarbonSession()
+        .getOrCreateCarbonSession(storeLocation)
     }
     spark.sparkContext.setLogLevel("ERROR")
-
     println("\nEnvironment information:")
     val env = Array(
       "spark.master",

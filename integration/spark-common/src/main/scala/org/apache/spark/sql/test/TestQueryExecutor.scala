@@ -128,6 +128,11 @@ object TestQueryExecutor {
       } else {
         s"$target/bad_store"
       }
+  val systemFolderPath = if (hdfsUrl.startsWith("hdfs://")) {
+    s"$hdfsUrl/systemfolder" + System.nanoTime()
+  } else {
+    s"$target/systemfolder"
+  }
     createDirectory(badStoreLocation)
 
   val hiveresultpath = if (hdfsUrl.startsWith("hdfs://")) {
@@ -148,10 +153,12 @@ object TestQueryExecutor {
     TestQueryExecutor.projectPath + "/core/target",
     TestQueryExecutor.projectPath + "/hadoop/target",
     TestQueryExecutor.projectPath + "/processing/target",
+    TestQueryExecutor.projectPath + "/integration/spark-datasource/target",
     TestQueryExecutor.projectPath + "/integration/spark-common/target",
     TestQueryExecutor.projectPath + "/integration/spark2/target",
     TestQueryExecutor.projectPath + "/integration/spark-common/target/jars",
-    TestQueryExecutor.projectPath + "/streaming/target")
+    TestQueryExecutor.projectPath + "/streaming/target",
+    TestQueryExecutor.projectPath + "/store/sdk/target")
 
   lazy val jars = {
     val jarsLocal = new ArrayBuffer[String]()
@@ -174,6 +181,7 @@ object TestQueryExecutor {
       (CarbonCommonConstants.DICTIONARY_SERVER_PORT_DEFAULT.toInt + Random.nextInt(100)) + "")
     .addProperty(CarbonCommonConstants.CARBON_MAX_DRIVER_LRU_CACHE_SIZE, "1024")
     .addProperty(CarbonCommonConstants.CARBON_MAX_EXECUTOR_LRU_CACHE_SIZE, "1024")
+    .addProperty(CarbonCommonConstants.CARBON_SYSTEM_FOLDER_LOCATION, systemFolderPath)
 
   private def lookupQueryExecutor: Class[_] = {
     ServiceLoader.load(classOf[TestQueryExecutorRegister], Utils.getContextOrSparkClassLoader)

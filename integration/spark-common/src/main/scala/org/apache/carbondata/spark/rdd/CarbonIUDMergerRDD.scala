@@ -16,21 +16,19 @@
  */
 package org.apache.carbondata.spark.rdd
 
-import java.util
-import java.util.List
-
 import scala.collection.JavaConverters._
 
-import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.mapred.JobConf
 import org.apache.hadoop.mapreduce.Job
-import org.apache.spark.{Partition, SparkContext}
+import org.apache.spark.Partition
 import org.apache.spark.deploy.SparkHadoopUtil
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.execution.command.CarbonMergerMapping
 
+import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.metadata.{AbsoluteTableIdentifier, CarbonTableIdentifier}
 import org.apache.carbondata.hadoop.{CarbonInputSplit, CarbonMultiBlockSplit}
-import org.apache.carbondata.hadoop.api.{CarbonInputFormat, CarbonTableInputFormat}
+import org.apache.carbondata.hadoop.api.CarbonInputFormat
 import org.apache.carbondata.hadoop.util.CarbonInputFormatUtil
 import org.apache.carbondata.processing.loading.model.CarbonLoadModel
 import org.apache.carbondata.processing.merger.CarbonDataMergerUtil
@@ -40,23 +38,21 @@ import org.apache.carbondata.spark.MergeResult
  * IUD carbon merger RDD
  * */
 class CarbonIUDMergerRDD[K, V](
-    sc: SparkContext,
+    @transient private val ss: SparkSession,
     result: MergeResult[K, V],
     carbonLoadModel: CarbonLoadModel,
-    carbonMergerMapping: CarbonMergerMapping,
-    confExecutorsTemp: String)
-  extends CarbonMergerRDD[K, V](sc,
+    carbonMergerMapping: CarbonMergerMapping)
+  extends CarbonMergerRDD[K, V](ss,
     result,
     carbonLoadModel,
-    carbonMergerMapping,
-    confExecutorsTemp) {
+    carbonMergerMapping) {
 
-  override def getPartitions: Array[Partition] = {
+  override def internalGetPartitions: Array[Partition] = {
     val startTime = System.currentTimeMillis()
     val absoluteTableIdentifier: AbsoluteTableIdentifier = AbsoluteTableIdentifier.from(
       tablePath, new CarbonTableIdentifier(databaseName, factTableName, tableId)
     )
-    val jobConf: JobConf = new JobConf(new Configuration)
+    val jobConf: JobConf = new JobConf(FileFactory.getConfiguration)
     SparkHadoopUtil.get.addCredentials(jobConf)
     val job: Job = new Job(jobConf)
     val format = CarbonInputFormatUtil.createCarbonInputFormat(absoluteTableIdentifier, job)
@@ -74,7 +70,8 @@ class CarbonIUDMergerRDD[K, V](
     val carbonInputSplits = splits.asScala.map(_.asInstanceOf[CarbonInputSplit])
 
     // group blocks by segment.
-    val splitsGroupedMySegment = carbonInputSplits.groupBy(_.getSegmentId)
+    val splitsGroupedMySegment =
+      carbonInputSplits.groupBy(_.getSegmentId)
 
     var i = -1
 

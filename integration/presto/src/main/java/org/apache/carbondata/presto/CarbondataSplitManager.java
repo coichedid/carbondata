@@ -17,14 +17,23 @@
 
 package org.apache.carbondata.presto;
 
-import javax.inject.Inject;
 import java.util.List;
 import java.util.Optional;
 
+import javax.inject.Inject;
+
+import static java.util.Objects.requireNonNull;
+
 import org.apache.carbondata.core.scan.expression.Expression;
-import org.apache.carbondata.presto.impl.CarbonLocalInputSplit;
+import org.apache.carbondata.core.stats.QueryStatistic;
+import org.apache.carbondata.core.stats.QueryStatisticsConstants;
+import org.apache.carbondata.core.stats.QueryStatisticsRecorder;
+import org.apache.carbondata.core.util.CarbonTimeStatisticsFactory;
+import org.apache.carbondata.presto.impl.CarbonLocalMultiBlockSplit;
 import org.apache.carbondata.presto.impl.CarbonTableCacheModel;
 import org.apache.carbondata.presto.impl.CarbonTableReader;
+
+import static org.apache.carbondata.presto.Types.checkType;
 
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorSession;
@@ -38,8 +47,6 @@ import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
 import com.facebook.presto.spi.predicate.TupleDomain;
 import com.google.common.collect.ImmutableList;
 
-import static java.util.Objects.requireNonNull;
-import static org.apache.carbondata.presto.Types.checkType;
 
 /**
  * Build Carbontable splits
@@ -57,30 +64,52 @@ public class CarbondataSplitManager implements ConnectorSplitManager {
   }
 
   public ConnectorSplitSource getSplits(ConnectorTransactionHandle transactionHandle,
-      ConnectorSession session, ConnectorTableLayoutHandle layout) {
+      ConnectorSession session, ConnectorTableLayoutHandle layout,
+      SplitSchedulingStrategy splitSchedulingStrategy) {
     CarbondataTableLayoutHandle layoutHandle = (CarbondataTableLayoutHandle) layout;
     CarbondataTableHandle tableHandle = layoutHandle.getTable();
     SchemaTableName key = tableHandle.getSchemaTableName();
 
-    // Packaging presto-TupleDomain into CarbondataColumnConstraint, to decouple from presto-spi Module
+    String queryId = System.nanoTime() + "";
+    QueryStatistic statistic = new QueryStatistic();
+    QueryStatisticsRecorder statisticRecorder = CarbonTimeStatisticsFactory.createDriverRecorder();
+    statistic.addStatistics(QueryStatisticsConstants.BLOCK_ALLOCATION, System.currentTimeMillis());
+    statisticRecorder.recordStatisticsForDriver(statistic, queryId);
+    statistic = new QueryStatistic();
+
+    carbonTableReader.setQueryId(queryId);
+    // Packaging presto-TupleDomain into CarbondataColumnConstraint,
+    // to decouple from presto-spi Module
     List<CarbondataColumnConstraint> rebuildConstraints =
         getColumnConstraints(layoutHandle.getConstraint());
 
     CarbonTableCacheModel cache = carbonTableReader.getCarbonCache(key);
-    Expression filters = PrestoFilterUtil.parseFilterExpression(layoutHandle.getConstraint());
-    try {
-      List<CarbonLocalInputSplit> splits = carbonTableReader.getInputSplits2(cache, filters, layoutHandle.getConstraint());
+    if (null != cache) {
+      Expression filters = PrestoFilterUtil.parseFilterExpression(layoutHandle.getConstraint());
+      try {
+        List<CarbonLocalMultiBlockSplit> splits =
+            carbonTableReader.getInputSplits2(cache, filters, layoutHandle.getConstraint());
 
-      ImmutableList.Builder<ConnectorSplit> cSplits = ImmutableList.builder();
-      for (CarbonLocalInputSplit split : splits) {
-        cSplits.add(new CarbondataSplit(connectorId, tableHandle.getSchemaTableName(),
-            layoutHandle.getConstraint(), split, rebuildConstraints));
+        ImmutableList.Builder<ConnectorSplit> cSplits = ImmutableList.builder();
+        long index = 0;
+        for (CarbonLocalMultiBlockSplit split : splits) {
+          index++;
+          cSplits.add(new CarbondataSplit(connectorId, tableHandle.getSchemaTableName(),
+              layoutHandle.getConstraint(), split, rebuildConstraints, queryId, index));
+        }
+
+        statisticRecorder.logStatisticsAsTableDriver();
+
+        statistic.addStatistics(QueryStatisticsConstants.BLOCK_IDENTIFICATION,
+            System.currentTimeMillis());
+        statisticRecorder.recordStatisticsForDriver(statistic, queryId);
+        statisticRecorder.logStatisticsAsTableDriver();
+        return new FixedSplitSource(cSplits.build());
+      } catch (Exception ex) {
+        throw new RuntimeException(ex.getMessage(), ex);
       }
-      return new FixedSplitSource(cSplits.build());
-    } catch (Exception ex) {
-      throw new RuntimeException(ex.getMessage(), ex);
     }
-
+    return null;
   }
 
   /**

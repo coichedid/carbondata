@@ -30,7 +30,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.profiler.{Optimizer, Profiler}
-import org.apache.spark.sql.types.{IntegerType, StringType}
+import org.apache.spark.sql.types._
 
 import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.constants.CarbonCommonConstants
@@ -673,7 +673,9 @@ class CarbonLateDecodeRule extends Rule[LogicalPlan] with PredicateHelper {
         val updatedProj = ex.projections.map { projs =>
           projs.zipWithIndex.map { case(p, index) =>
             p.transform {
-              case l: Literal if l.dataType != ex.output(index).dataType =>
+              case l: Literal
+                if l.dataType != ex.output(index).dataType &&
+                   !isComplexColumn(ex.output(index), ex.child.output) =>
                 Literal(l.value, ex.output(index).dataType)
             }
           }
@@ -729,6 +731,26 @@ class CarbonLateDecodeRule extends Rule[LogicalPlan] with PredicateHelper {
     }
   }
 
+  /**
+   * Check whether given column is derived from complex column.
+   */
+  def isComplexColumn(attribute: Attribute, output: Seq[Attribute]): Boolean = {
+    val attrName = attribute.name.replace("`", "")
+    output.exists { a =>
+      a.dataType match {
+        case s: StructType =>
+          s.fields.map(sf => a.name + "." + sf.name).exists(n => {
+            attrName.contains(n)
+          })
+        case ar : ArrayType =>
+          attrName.contains(a.name + "[") || attrName.contains(a.name + ".")
+        case m: MapType =>
+          attrName.contains(a.name + "[")
+        case _ => false
+      }
+    }
+  }
+
   private def updateProjection(plan: LogicalPlan): LogicalPlan = {
     val transFormedPlan = plan transform {
       case p@Project(projectList: Seq[NamedExpression], cd: CarbonDictionaryCatalystDecoder) =>
@@ -764,8 +786,12 @@ class CarbonLateDecodeRule extends Rule[LogicalPlan] with PredicateHelper {
           p.transformAllExpressions {
             case a@Alias(exp, _)
               if !exp.deterministic && !exp.isInstanceOf[CustomDeterministicExpression] =>
-              Alias(CustomDeterministicExpression(exp), a.name)(a.exprId, a.qualifier,
-                a.explicitMetadata, a.isGenerated)
+              CarbonToSparkAdapater.createAliasRef(CustomDeterministicExpression(exp),
+                a.name,
+                a.exprId,
+                a.qualifier,
+                a.explicitMetadata,
+                Some(a))
             case exp: NamedExpression
               if !exp.deterministic && !exp.isInstanceOf[CustomDeterministicExpression] =>
               CustomDeterministicExpression(exp)
@@ -778,8 +804,12 @@ class CarbonLateDecodeRule extends Rule[LogicalPlan] with PredicateHelper {
           f.transformAllExpressions {
             case a@Alias(exp, _)
               if !exp.deterministic && !exp.isInstanceOf[CustomDeterministicExpression] =>
-              Alias(CustomDeterministicExpression(exp), a.name)(a.exprId, a.qualifier,
-                a.explicitMetadata, a.isGenerated)
+              CarbonToSparkAdapater.createAliasRef(CustomDeterministicExpression(exp),
+                a.name,
+                a.exprId,
+                a.qualifier,
+                a.explicitMetadata,
+                Some(a))
             case exp: NamedExpression
               if !exp.deterministic && !exp.isInstanceOf[CustomDeterministicExpression] =>
               CustomDeterministicExpression(exp)

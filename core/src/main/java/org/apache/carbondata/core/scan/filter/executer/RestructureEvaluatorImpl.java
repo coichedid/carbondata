@@ -17,7 +17,9 @@
 
 package org.apache.carbondata.core.scan.filter.executer;
 
+import java.io.IOException;
 import java.nio.charset.Charset;
+import java.util.BitSet;
 import java.util.List;
 
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
@@ -28,10 +30,12 @@ import org.apache.carbondata.core.metadata.encoder.Encoding;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonDimension;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonMeasure;
 import org.apache.carbondata.core.scan.executor.util.RestructureUtil;
+import org.apache.carbondata.core.scan.expression.exception.FilterUnsupportedException;
 import org.apache.carbondata.core.scan.filter.ColumnFilterInfo;
+import org.apache.carbondata.core.scan.filter.FilterUtil;
 import org.apache.carbondata.core.scan.filter.resolver.resolverinfo.DimColumnResolvedFilterInfo;
 import org.apache.carbondata.core.scan.filter.resolver.resolverinfo.MeasureColumnResolvedFilterInfo;
-import org.apache.carbondata.core.util.ByteUtil;
+import org.apache.carbondata.core.scan.processor.RawBlockletColumnChunks;
 import org.apache.carbondata.core.util.comparator.Comparator;
 import org.apache.carbondata.core.util.comparator.SerializableComparator;
 
@@ -65,7 +69,7 @@ public abstract class RestructureEvaluatorImpl implements FilterExecuter {
       }
       List<byte[]> noDictionaryFilterValuesList = filterValues.getNoDictionaryFilterValuesList();
       for (byte[] filterValue : noDictionaryFilterValuesList) {
-        int compare = ByteUtil.UnsafeComparer.INSTANCE.compareTo(defaultValue, filterValue);
+        int compare = FilterUtil.compareValues(filterValue, defaultValue, dimension, true);
         if (compare == 0) {
           isDefaultValuePresentInFilterValues = true;
           break;
@@ -104,6 +108,12 @@ public abstract class RestructureEvaluatorImpl implements FilterExecuter {
     return isDefaultValuePresentInFilterValues;
   }
 
+  @Override
+  public BitSet prunePages(RawBlockletColumnChunks rawBlockletColumnChunks)
+      throws FilterUnsupportedException, IOException {
+    throw new FilterUnsupportedException("Unsupported RestructureEvaluatorImpl on pune pages");
+  }
+
   /**
    * This method will check whether a default value for the non-existing column is present
    * in the filter values list
@@ -134,5 +144,4 @@ public abstract class RestructureEvaluatorImpl implements FilterExecuter {
     }
     return isDefaultValuePresentInFilterValues;
   }
-
 }

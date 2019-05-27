@@ -85,9 +85,9 @@ class DropColumnTestCases extends Spark2QueryTest with BeforeAndAfterAll {
       sql(s"LOAD DATA LOCAL INPATH '$resourcesPath/restructure/data4.csv' INTO TABLE dropcolumntest"
           + s" OPTIONS('FILEHEADER'='intField,stringField,timestampField,decimalField')")
       sql("ALTER TABLE dropcolumntest COMPACT 'major'")
-      checkExistence(sql("SHOW SEGMENTS FOR TABLE dropcolumntest"), true, "0Compacted")
-      checkExistence(sql("SHOW SEGMENTS FOR TABLE dropcolumntest"), true, "1Compacted")
-      checkExistence(sql("SHOW SEGMENTS FOR TABLE dropcolumntest"), true, "0.1Success")
+      checkExistence(sql("SHOW SEGMENTS FOR TABLE dropcolumntest"), true, "0 Compacted")
+      checkExistence(sql("SHOW SEGMENTS FOR TABLE dropcolumntest"), true, "1 Compacted")
+      checkExistence(sql("SHOW SEGMENTS FOR TABLE dropcolumntest"), true, "0.1 Success")
       afterAll
     }
     sqlContext.setConf("carbon.enable.vector.reader", "true")
@@ -110,6 +110,15 @@ class DropColumnTestCases extends Spark2QueryTest with BeforeAndAfterAll {
     }.getMessage.contains("Cannot drop columns in pre-aggreagate table"))
     sql("drop table if exists preaggMain")
     sql("drop table if exists preaggMain_preagg1")
+  }
+
+  test("test dropping of complex column should throw exception") {
+    sql("drop table if exists maintbl")
+    sql("create table maintbl (a string, b string, c struct<si:int>) stored by 'carbondata'")
+    assert(intercept[ProcessMetaDataException] {
+      sql("alter table maintbl drop columns(b,c)").show
+    }.getMessage.contains("Complex column cannot be dropped"))
+    sql("drop table if exists maintbl")
   }
 
   override def afterAll {

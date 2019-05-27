@@ -18,6 +18,7 @@
 package org.apache.spark.sql.execution.strategy
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.rdd.RDD
@@ -29,11 +30,13 @@ import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.plans.physical.{HashPartitioning, Partitioning, UnknownPartitioning}
 import org.apache.spark.sql.execution._
-import org.apache.spark.sql.execution.datasources.LogicalRelation
+import org.apache.spark.sql.execution.datasources.{CatalogFileIndex, HadoopFsRelation, InMemoryFileIndex, LogicalRelation, SparkCarbonTableFormat}
 import org.apache.spark.sql.optimizer.{CarbonDecoderRelation, CarbonFilters}
 import org.apache.spark.sql.sources.{BaseRelation, Filter}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.CarbonExpressions.{MatchCast => Cast}
+import org.apache.spark.sql.carbondata.execution.datasources.{CarbonFileIndex, CarbonSparkDataSourceUtil}
+import org.apache.spark.util.CarbonReflectionUtils
 
 import org.apache.carbondata.common.exceptions.sql.MalformedCarbonCommandException
 import org.apache.carbondata.core.constants.CarbonCommonConstants
@@ -42,10 +45,9 @@ import org.apache.carbondata.core.metadata.schema.BucketingInfo
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable
 import org.apache.carbondata.core.statusmanager.SegmentUpdateStatusManager
 import org.apache.carbondata.core.util.CarbonProperties
-import org.apache.carbondata.datamap.{TextMatch, TextMatchUDF}
+import org.apache.carbondata.datamap.{TextMatch, TextMatchLimit, TextMatchMaxDocUDF, TextMatchUDF}
 import org.apache.carbondata.spark.CarbonAliasDecoderRelation
 import org.apache.carbondata.spark.rdd.CarbonScanRDD
-import org.apache.carbondata.spark.util.CarbonScalaUtil
 
 /**
  * Carbon specific optimization for late decode (convert dictionary key to value as late as
@@ -54,17 +56,33 @@ import org.apache.carbondata.spark.util.CarbonScalaUtil
 private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
   val PUSHED_FILTERS = "PushedFilters"
 
+  /*
+  Spark 2.3.1 plan there can be case of multiple projections like below
+  Project [substring(name, 1, 2)#124, name#123, tupleId#117, cast(rand(-6778822102499951904)#125
+  as string) AS rand(-6778822102499951904)#137]
+   +- Project [substring(name#123, 1, 2) AS substring(name, 1, 2)#124, name#123, UDF:getTupleId()
+    AS tupleId#117,
+       customdeterministicexpression(rand(-6778822102499951904)) AS rand(-6778822102499951904)#125]
+   +- Relation[imei#118,age#119,task#120L,num#121,level#122,name#123]
+   CarbonDatasourceHadoopRelation []
+ */
   def apply(plan: LogicalPlan): Seq[SparkPlan] = {
     plan match {
       case PhysicalOperation(projects, filters, l: LogicalRelation)
         if l.relation.isInstanceOf[CarbonDatasourceHadoopRelation] =>
         val relation = l.relation.asInstanceOf[CarbonDatasourceHadoopRelation]
-        pruneFilterProject(
-          l,
-          projects,
-          filters,
-          (a, f, needDecoder, p) => toCatalystRDD(l, a, relation.buildScan(
-            a.map(_.name).toArray, f, p), needDecoder)) :: Nil
+        // In Spark 2.3.1 there is case of multiple projections like below
+        // if 1 projection is failed then need to continue to other
+        try {
+          pruneFilterProject(
+            l,
+            projects,
+            filters,
+            (a, f, needDecoder, p) => toCatalystRDD(l, a, relation.buildScan(
+              a.map(_.name).toArray, filters, projects, f, p), needDecoder)) :: Nil
+        } catch {
+          case e: CarbonPhysicalPlanException => Nil
+        }
       case CarbonDictionaryCatalystDecoder(relations, profile, aliasMap, _, child) =>
         if ((profile.isInstanceOf[IncludeProfile] && profile.isEmpty) ||
             !CarbonDictionaryDecoder.
@@ -100,7 +118,7 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
     val updateDeltaMetadata = segmentUpdateStatusManager.readLoadMetadata()
     if (updateDeltaMetadata != null && updateDeltaMetadata.nonEmpty) {
       false
-    } else if (relation.carbonTable.isStreamingTable) {
+    } else if (relation.carbonTable.isStreamingSink) {
       false
     } else {
       true
@@ -119,7 +137,7 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
       val newAttr = AttributeReference(attr.name,
         attr.dataType,
         attr.nullable,
-        attr.metadata)(attr.exprId, Option(table.carbonRelation.tableName))
+        attr.metadata)(attr.exprId, Seq(table.carbonRelation.tableName))
       relation.addAttribute(newAttr)
       newAttr
     }
@@ -156,17 +174,20 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
     if (names.nonEmpty) {
       val partitionSet = AttributeSet(names
         .map(p => relation.output.find(_.name.equalsIgnoreCase(p)).get))
-      val partitionKeyFilters =
-        ExpressionSet(ExpressionSet(filterPredicates).filter(_.references.subsetOf(partitionSet)))
+      val partitionKeyFilters = CarbonToSparkAdapater
+        .getPartitionKeyFilter(partitionSet, filterPredicates)
       // Update the name with lower case as it is case sensitive while getting partition info.
       val updatedPartitionFilters = partitionKeyFilters.map { exp =>
         exp.transform {
           case attr: AttributeReference =>
-            AttributeReference(
+            CarbonToSparkAdapater.createAttributeReference(
               attr.name.toLowerCase,
               attr.dataType,
               attr.nullable,
-              attr.metadata)(attr.exprId, attr.qualifier, attr.isGenerated)
+              attr.metadata,
+              attr.exprId,
+              attr.qualifier,
+              attr)
         }
       }
       partitions =
@@ -191,11 +212,12 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
       rdd: RDD[InternalRow],
       needDecode: ArrayBuffer[AttributeReference]):
   RDD[InternalRow] = {
+    val scanRdd = rdd.asInstanceOf[CarbonScanRDD[InternalRow]]
     if (needDecode.nonEmpty) {
-      rdd.asInstanceOf[CarbonScanRDD[InternalRow]].setVectorReaderSupport(false)
+      scanRdd.setVectorReaderSupport(false)
       getDecoderRDD(relation, needDecode, rdd, output)
     } else {
-      rdd.asInstanceOf[CarbonScanRDD[InternalRow]]
+      scanRdd
         .setVectorReaderSupport(supportBatchedDataSource(relation.relation.sqlContext, output))
       rdd
     }
@@ -214,7 +236,9 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
       }
     }.asInstanceOf[Seq[NamedExpression]]
 
-    val projectSet = AttributeSet(projects.flatMap(_.references))
+    // contains the original order of the projection requested
+    val projectsAttr = projects.flatMap(_.references)
+    val projectSet = AttributeSet(projectsAttr)
     val filterSet = AttributeSet(filterPredicates.flatMap(_.references))
 
     val candidatePredicates = filterPredicates.map {
@@ -223,7 +247,7 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
       }
     }
 
-    val (unhandledPredicates, pushedFilters) =
+    val (unhandledPredicates, pushedFilters, handledFilters ) =
       selectFilters(relation.relation, candidatePredicates)
 
     // A set of column attributes that are only referenced by pushed down filters.  We can eliminate
@@ -231,10 +255,13 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
     val handledSet = {
       val handledPredicates = filterPredicates.filterNot(unhandledPredicates.contains)
       val unhandledSet = AttributeSet(unhandledPredicates.flatMap(_.references))
-      AttributeSet(handledPredicates.flatMap(_.references)) --
-      (projectSet ++ unhandledSet).map(relation.attributeMap)
+      try {
+        AttributeSet(handledPredicates.flatMap(_.references)) --
+        (projectSet ++ unhandledSet).map(relation.attributeMap)
+      } catch {
+        case e: Throwable => throw new CarbonPhysicalPlanException
+      }
     }
-
     // Combines all Catalyst filter `Expression`s that are either not convertible to data source
     // `Filter`s or cannot be handled by `relation`.
     val filterCondition = unhandledPredicates.reduceLeftOption(expressions.And)
@@ -275,7 +302,15 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
           }
         }
     }
+    // in case of the global dictionary if it has the filter then it needs to decode all data before
+    // applying the filter in spark's side. So we should disable vectorPushRowFilters option
+    // in case of filters on global dictionary.
+    val hasDictionaryFilterCols = hasFilterOnDictionaryColumn(filterSet, table)
 
+    // In case of more dictionary columns spark code gen needs generate lot of code and that slows
+    // down the query, so we limit the direct fill in case of more dictionary columns.
+    val hasMoreDictionaryCols = hasMoreDictionaryColumnsOnProjection(projectSet, table)
+    val vectorPushRowFilters = CarbonProperties.getInstance().isPushRowFiltersForVector
     if (projects.map(_.toAttribute) == projects &&
         projectSet.size == projects.size &&
         filterSet.subsetOf(projectSet)) {
@@ -308,89 +343,152 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
         scanBuilder,
         candidatePredicates,
         pushedFilters,
+        handledFilters,
         metadata,
         needDecoder,
         updateRequestedColumns.asInstanceOf[Seq[Attribute]])
-      filterCondition.map(execution.FilterExec(_, scan)).getOrElse(scan)
+      // Check whether spark should handle row filters in case of vector flow.
+      if (!vectorPushRowFilters && scan.isInstanceOf[CarbonDataSourceScan]
+          && !hasDictionaryFilterCols && !hasMoreDictionaryCols) {
+        // Here carbon only do page pruning and row level pruning will be done by spark.
+        scan.inputRDDs().head match {
+          case rdd: CarbonScanRDD[InternalRow] =>
+            rdd.setDirectScanSupport(true)
+          case _ =>
+        }
+        filterPredicates.reduceLeftOption(expressions.And).map(execution.FilterExec(_, scan))
+          .getOrElse(scan)
+      } else {
+        filterCondition.map(execution.FilterExec(_, scan)).getOrElse(scan)
+      }
     } else {
 
       var newProjectList: Seq[Attribute] = Seq.empty
+      // In case of implicit exist we should disable vectorPushRowFilters as it goes in IUD flow
+      // to get the positionId or tupleID
+      var implictsExisted = false
       val updatedProjects = projects.map {
           case a@Alias(s: ScalaUDF, name)
             if name.equalsIgnoreCase(CarbonCommonConstants.POSITION_ID) ||
                 name.equalsIgnoreCase(CarbonCommonConstants.CARBON_IMPLICIT_COLUMN_TUPLEID) =>
             val reference = AttributeReference(name, StringType, true)().withExprId(a.exprId)
             newProjectList :+= reference
+            implictsExisted = true
             reference
           case a@Alias(s: ScalaUDF, name)
             if name.equalsIgnoreCase(CarbonCommonConstants.CARBON_IMPLICIT_COLUMN_SEGMENTID) =>
+            implictsExisted = true
             val reference =
               AttributeReference(CarbonCommonConstants.CARBON_IMPLICIT_COLUMN_TUPLEID,
                 StringType, true)().withExprId(a.exprId)
             newProjectList :+= reference
             a.transform {
               case s: ScalaUDF =>
-                ScalaUDF(s.function, s.dataType, Seq(reference), s.inputTypes)
+                ScalaUDF(s.function, s.dataType, Seq(reference), s.inputsNullSafe, s.inputTypes)
             }
           case other => other
       }
       // Don't request columns that are only referenced by pushed filters.
       val requestedColumns =
-        (projectSet ++ filterSet -- handledSet).map(relation.attributeMap).toSeq ++ newProjectList
-      val updateRequestedColumns = updateRequestedColumnsFunc(requestedColumns, table, needDecoder)
+        getRequestedColumns(relation, projectsAttr, filterSet, handledSet, newProjectList)
+
+      var updateRequestedColumns =
+        if (!vectorPushRowFilters && !implictsExisted && !hasDictionaryFilterCols
+            && !hasMoreDictionaryCols) {
+          updateRequestedColumnsFunc(
+            (projectSet ++ filterSet).map(relation.attributeMap).toSeq,
+            table,
+            needDecoder)
+      } else {
+        updateRequestedColumnsFunc(requestedColumns, table, needDecoder)
+      }
+      val supportBatch =
+        supportBatchedDataSource(relation.relation.sqlContext,
+          updateRequestedColumns.asInstanceOf[Seq[Attribute]]) &&
+        needDecoder.isEmpty
+      if (!vectorPushRowFilters && !supportBatch && !implictsExisted && !hasDictionaryFilterCols
+          && !hasMoreDictionaryCols) {
+        // revert for row scan
+        updateRequestedColumns = updateRequestedColumnsFunc(requestedColumns, table, needDecoder)
+      }
       val scan = getDataSourceScan(relation,
         updateRequestedColumns.asInstanceOf[Seq[Attribute]],
         partitions,
         scanBuilder,
         candidatePredicates,
         pushedFilters,
+        handledFilters,
         metadata,
         needDecoder,
         updateRequestedColumns.asInstanceOf[Seq[Attribute]])
-      execution.ProjectExec(
-        updateRequestedColumnsFunc(updatedProjects, table,
-          needDecoder).asInstanceOf[Seq[NamedExpression]],
-        filterCondition.map(execution.FilterExec(_, scan)).getOrElse(scan))
+      // Check whether spark should handle row filters in case of vector flow.
+      if (!vectorPushRowFilters && scan.isInstanceOf[CarbonDataSourceScan]
+          && !implictsExisted && !hasDictionaryFilterCols && !hasMoreDictionaryCols) {
+        // Here carbon only do page pruning and row level pruning will be done by spark.
+        scan.inputRDDs().head match {
+          case rdd: CarbonScanRDD[InternalRow] =>
+            rdd.setDirectScanSupport(true)
+          case _ =>
+        }
+        execution.ProjectExec(
+          updateRequestedColumnsFunc(updatedProjects, table,
+            needDecoder).asInstanceOf[Seq[NamedExpression]],
+          filterPredicates.reduceLeftOption(expressions.And).map(
+            execution.FilterExec(_, scan)).getOrElse(scan))
+      } else {
+        execution.ProjectExec(
+          updateRequestedColumnsFunc(updatedProjects, table,
+            needDecoder).asInstanceOf[Seq[NamedExpression]],
+          filterCondition.map(execution.FilterExec(_, scan)).getOrElse(scan))
+      }
+
     }
+  }
+
+  protected def getRequestedColumns(relation: LogicalRelation,
+      projectsAttr: Seq[Attribute],
+      filterSet: AttributeSet,
+      handledSet: AttributeSet,
+      newProjectList: Seq[Attribute]) = {
+    (projectsAttr.to[mutable.LinkedHashSet] ++ filterSet -- handledSet)
+      .map(relation.attributeMap).toSeq ++ newProjectList
   }
 
   private def getDataSourceScan(relation: LogicalRelation,
       output: Seq[Attribute],
       partitions: Seq[PartitionSpec],
       scanBuilder: (Seq[Attribute], Seq[Expression], Seq[Filter],
-        ArrayBuffer[AttributeReference], Seq[PartitionSpec]) => RDD[InternalRow],
+        ArrayBuffer[AttributeReference], Seq[PartitionSpec])
+        => RDD[InternalRow],
       candidatePredicates: Seq[Expression],
-      pushedFilters: Seq[Filter],
+      pushedFilters: Seq[Filter], handledFilters: Seq[Filter],
       metadata: Map[String, String],
       needDecoder: ArrayBuffer[AttributeReference],
       updateRequestedColumns: Seq[Attribute]): DataSourceScanExec = {
     val table = relation.relation.asInstanceOf[CarbonDatasourceHadoopRelation]
     if (supportBatchedDataSource(relation.relation.sqlContext, updateRequestedColumns) &&
         needDecoder.isEmpty) {
-      BatchedDataSourceScanExec(
+      new CarbonDataSourceScan(
         output,
         scanBuilder(updateRequestedColumns,
           candidatePredicates,
           pushedFilters,
           needDecoder,
           partitions),
-        relation.relation,
+        createHadoopFSRelation(relation),
         getPartitioning(table.carbonTable, updateRequestedColumns),
         metadata,
         relation.catalogTable.map(_.identifier), relation)
     } else {
-      RowDataSourceScanExec(output,
-        scanBuilder(updateRequestedColumns,
-          candidatePredicates,
-          pushedFilters,
-          needDecoder,
-          partitions),
-        relation.relation,
-        getPartitioning(table.carbonTable, updateRequestedColumns),
-        metadata,
-        relation.catalogTable.map(_.identifier))
+      val partition = getPartitioning(table.carbonTable, updateRequestedColumns)
+      val rdd = scanBuilder(updateRequestedColumns, candidatePredicates,
+        pushedFilters, needDecoder, partitions)
+      CarbonReflectionUtils.getRowDataSourceScanExecObj(relation, output,
+        pushedFilters, handledFilters,
+        rdd, partition, metadata)
     }
   }
+
 
   def updateRequestedColumnsFunc(requestedColumns: Seq[Expression],
       relation: CarbonDatasourceHadoopRelation,
@@ -432,6 +530,24 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
     }
   }
 
+  private def hasFilterOnDictionaryColumn(filterColumns: AttributeSet,
+      relation: CarbonDatasourceHadoopRelation): Boolean = {
+    val map = relation.carbonRelation.metaData.dictionaryMap
+    filterColumns.exists(c => map.get(c.name).getOrElse(false))
+  }
+
+  private def hasMoreDictionaryColumnsOnProjection(projectColumns: AttributeSet,
+      relation: CarbonDatasourceHadoopRelation): Boolean = {
+    val map = relation.carbonRelation.metaData.dictionaryMap
+    var count = 0
+    projectColumns.foreach{c =>
+      if (map.get(c.name).getOrElse(false)) {
+        count += 1
+      }
+    }
+    count > CarbonCommonConstants.CARBON_ALLOW_DIRECT_FILL_DICT_COLS_LIMIT
+  }
+
   private def getPartitioning(carbonTable: CarbonTable,
       output: Seq[Attribute]): Partitioning = {
     val info: BucketingInfo = carbonTable.getBucketingInfo(carbonTable.getTableName)
@@ -445,7 +561,7 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
         attrRef match {
           case Some(attr: AttributeReference) =>
             Some(AttributeReference(attr.name,
-              CarbonScalaUtil.convertCarbonToSparkDataType(n.getDataType),
+              CarbonSparkDataSourceUtil.convertCarbonToSparkDataType(n.getDataType),
               attr.nullable,
               attr.metadata)(attr.exprId, attr.qualifier))
           case _ => None
@@ -464,12 +580,13 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
   private def isComplexAttribute(attribute: Attribute) = attribute.dataType match {
     case ArrayType(dataType, _) => true
     case StructType(_) => true
+    case MapType(_, _, _) => true
     case _ => false
   }
 
   protected[sql] def selectFilters(
       relation: BaseRelation,
-      predicates: Seq[Expression]): (Seq[Expression], Seq[Filter]) = {
+      predicates: Seq[Expression]): (Seq[Expression], Seq[Filter], Seq[Filter]) = {
 
     // In case of ComplexType dataTypes no filters should be pushed down. IsNotNull is being
     // explicitly added by spark and pushed. That also has to be handled and pushed back to
@@ -481,14 +598,29 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
 
     // For conciseness, all Catalyst filter expressions of type `expressions.Expression` below are
     // called `predicate`s, while all data source filters of type `sources.Filter` are simply called
-    // `filter`s.
+    // `filter`s. And block filters for lucene with more than one text_match udf
+    // Todo: handle when lucene and normal query filter is supported
 
-    val translated: Seq[(Expression, Filter)] =
-      for {
-        predicate <- predicatesWithoutComplex
-        filter <- translateFilter(predicate)
-      } yield predicate -> filter
-
+    var count = 0
+    val translated: Seq[(Expression, Filter)] = predicatesWithoutComplex.flatMap {
+      predicate =>
+        if (predicate.isInstanceOf[ScalaUDF]) {
+          predicate match {
+            case u: ScalaUDF if u.function.isInstanceOf[TextMatchUDF] ||
+                                u.function.isInstanceOf[TextMatchMaxDocUDF] => count = count + 1
+          }
+        }
+        if (count > 1) {
+          throw new MalformedCarbonCommandException(
+            "Specify all search filters for Lucene within a single text_match UDF")
+        }
+        val filter = translateFilter(predicate)
+        if (filter.isDefined) {
+          Some(predicate, filter.get)
+        } else {
+          None
+        }
+    }
 
     // A map from original Catalyst expressions to corresponding translated data source filters.
     val translatedMap: Map[Expression, Filter] = translated.toMap
@@ -519,7 +651,7 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
     // a filter to every row or not.
     val (_, translatedFilters) = translated.unzip
 
-    (unrecognizedPredicates ++ unhandledPredicates, translatedFilters)
+    (unrecognizedPredicates ++ unhandledPredicates, translatedFilters, handledFilters)
   }
 
   /**
@@ -535,6 +667,13 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
             "TEXT_MATCH UDF syntax: TEXT_MATCH('luceneQuerySyntax')")
         }
         Some(TextMatch(u.children.head.toString()))
+
+      case u: ScalaUDF if u.function.isInstanceOf[TextMatchMaxDocUDF] =>
+        if (u.children.size > 2) {
+          throw new MalformedCarbonCommandException(
+            "TEXT_MATCH UDF syntax: TEXT_MATCH_LIMIT('luceneQuerySyntax')")
+        }
+        Some(TextMatchLimit(u.children.head.toString(), u.children.last.toString()))
 
       case or@Or(left, right) =>
 
@@ -651,4 +790,36 @@ private[sql] class CarbonLateDecodeStrategy extends SparkStrategy {
     supportCodegen && vectorizedReader.toBoolean &&
     cols.forall(_.dataType.isInstanceOf[AtomicType])
   }
+
+  private def createHadoopFSRelation(relation: LogicalRelation): HadoopFsRelation = {
+    val sparkSession = relation.relation.sqlContext.sparkSession
+    relation.catalogTable match {
+      case Some(catalogTable) =>
+        val fileIndex = new CarbonFileIndex(sparkSession,
+          catalogTable.schema,
+          catalogTable.storage.properties,
+          new CatalogFileIndex(
+          sparkSession,
+          catalogTable,
+          sizeInBytes = relation.relation.sizeInBytes))
+        fileIndex.setDummy(true)
+        HadoopFsRelation(
+          fileIndex,
+          catalogTable.partitionSchema,
+          catalogTable.schema,
+          catalogTable.bucketSpec,
+          new SparkCarbonTableFormat,
+          catalogTable.storage.properties)(sparkSession)
+      case _ =>
+        HadoopFsRelation(
+          new InMemoryFileIndex(sparkSession, Seq.empty, Map.empty, None),
+          new StructType(),
+          relation.relation.schema,
+          None,
+          new SparkCarbonTableFormat,
+          null)(sparkSession)
+    }
+  }
 }
+
+class CarbonPhysicalPlanException extends Exception

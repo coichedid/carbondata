@@ -18,9 +18,14 @@
 package org.apache.carbondata.sdk.file;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
 
 import org.apache.carbondata.common.annotations.InterfaceAudience;
 import org.apache.carbondata.common.annotations.InterfaceStability;
+import org.apache.carbondata.core.metadata.datatype.ArrayType;
+import org.apache.carbondata.core.metadata.schema.table.column.ColumnSchema;
 
 import com.google.gson.GsonBuilder;
 import com.google.gson.TypeAdapter;
@@ -36,8 +41,24 @@ public class Schema {
 
   private Field[] fields;
 
+  /**
+   * construct a schema with fields
+   * @param fields
+   */
   public Schema(Field[] fields) {
     this.fields = fields;
+  }
+
+  /**
+   * construct a schema with List<ColumnSchema>
+   *
+   * @param columnSchemaList column schema list
+   */
+  public Schema(List<ColumnSchema> columnSchemaList) {
+    fields = new Field[columnSchemaList.size()];
+    for (int i = 0; i < columnSchemaList.size(); i++) {
+      fields[i] = new Field(columnSchemaList.get(i));
+    }
   }
 
   /**
@@ -46,6 +67,8 @@ public class Schema {
    *   {"name":"string"},
    *   {"age":"int"}
    * ]
+   * @param json specified as string
+   * @return Schema
    */
   public static Schema parseJson(String json) {
     GsonBuilder gsonBuilder = new GsonBuilder();
@@ -70,5 +93,82 @@ public class Schema {
 
   public Field[] getFields() {
     return fields;
+  }
+
+  /**
+   * get fields length of schema
+   *
+   * @return fields length
+   */
+  public int getFieldsLength() {
+    return fields.length;
+  }
+
+  /**
+   * get field name by ordinal
+   *
+   * @param ordinal the data index of carbon schema
+   * @return ordinal field name
+   */
+  public String getFieldName(int ordinal) {
+    return fields[ordinal].getFieldName();
+  }
+
+  /**
+   * get  field data type name by ordinal
+   *
+   * @param ordinal the data index of carbon schema
+   * @return ordinal field data type name
+   */
+  public String getFieldDataTypeName(int ordinal) {
+    return fields[ordinal].getDataType().getName();
+  }
+
+  /**
+   * get  array child element data type name by ordinal
+   *
+   * @param ordinal the data index of carbon schema
+   * @return ordinal array child element data type name
+   */
+  public String getArrayElementTypeName(int ordinal) {
+    if (getFieldDataTypeName(ordinal).equalsIgnoreCase("ARRAY")) {
+      return ((ArrayType) fields[ordinal].getDataType()).getElementType().getName();
+    }
+    throw new RuntimeException("Only support Array type.");
+  }
+
+  /**
+   * Sort the schema order as original order
+   *
+   * @return Schema object
+   */
+  public Schema asOriginOrder() {
+    Arrays.sort(fields, new Comparator<Field>() {
+      @Override
+      public int compare(Field o1, Field o2) {
+        return Integer.compare(o1.getSchemaOrdinal(), o2.getSchemaOrdinal());
+      }
+    });
+    return this;
+  }
+
+  @Override
+  public int hashCode() {
+    return super.hashCode();
+  }
+
+  @Override
+  public boolean equals(Object obj) {
+    if (obj instanceof Schema) {
+      Schema schema = (Schema) obj;
+      for (int i = 0; i < this.fields.length; i++) {
+        if (!(schema.fields)[i].equals((this.fields)[i])) {
+          return false;
+        }
+      }
+    } else {
+      return false;
+    }
+    return true;
   }
 }

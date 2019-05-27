@@ -33,11 +33,20 @@ public class TableFieldStat implements Serializable {
   private int dictSortDimCnt = 0;
   private int dictNoSortDimCnt = 0;
   private int noDictSortDimCnt = 0;
+  // for columns that are no_dict_dim and no_sort_dim, except complex/varchar dims
   private int noDictNoSortDimCnt = 0;
+  // for columns that are complex data type
+  private int complexDimCnt = 0;
+  // for columns that are varchar data type
+  private int varcharDimCnt = 0;
   // whether sort column is of dictionary type or not
   private boolean[] isSortColNoDictFlags;
+  private boolean[] isVarcharDimFlags;
   private int measureCnt;
   private DataType[] measureDataType;
+  private DataType[] noDictDataType;
+  private DataType[] noDictSortDataType;
+  private DataType[] noDictNoSortDataType;
 
   // indices for dict & sort dimension columns
   private int[] dictSortDimIdx;
@@ -45,49 +54,67 @@ public class TableFieldStat implements Serializable {
   private int[] dictNoSortDimIdx;
   // indices for no-dict & sort dimension columns
   private int[] noDictSortDimIdx;
-  // indices for no-dict & no-sort dimension columns, including complex columns
+  // indices for no-dict & no-sort dimension columns, excluding complex/varchar columns
   private int[] noDictNoSortDimIdx;
+  // indices for varchar dimension columns
+  private int[] varcharDimIdx;
+  // indices for varchar dimension columns
+  private int [] complexDimIdx;
   // indices for measure columns
   private int[] measureIdx;
 
   public TableFieldStat(SortParameters sortParameters) {
     int noDictDimCnt = sortParameters.getNoDictionaryCount();
-    int complexDimCnt = sortParameters.getComplexDimColCount();
     int dictDimCnt = sortParameters.getDimColCount() - noDictDimCnt;
+    this.complexDimCnt = sortParameters.getComplexDimColCount();
     this.isSortColNoDictFlags = sortParameters.getNoDictionarySortColumn();
-    int sortColCnt = isSortColNoDictFlags.length;
-    for (boolean flag : isSortColNoDictFlags) {
-      if (flag) {
+    this.isVarcharDimFlags = sortParameters.getIsVarcharDimensionColumn();
+    boolean[] isDimNoDictFlags = sortParameters.getNoDictionaryDimnesionColumn();
+    boolean[] sortColumn = sortParameters.getSortColumn();
+    for (int i = 0; i < isDimNoDictFlags.length; i++) {
+      if (isDimNoDictFlags[i] && sortColumn[i]) {
         noDictSortDimCnt++;
-      } else {
+      } else if (!isDimNoDictFlags[i] && sortColumn[i]) {
         dictSortDimCnt++;
       }
     }
     this.measureCnt = sortParameters.getMeasureColCount();
     this.measureDataType = sortParameters.getMeasureDataType();
+    this.noDictDataType = sortParameters.getNoDictDataType();
+    this.noDictSortDataType = sortParameters.getNoDictSortDataType();
+    this.noDictNoSortDataType = sortParameters.getNoDictNoSortDataType();
+    for (boolean flag : isVarcharDimFlags) {
+      if (flag) {
+        varcharDimCnt++;
+      }
+    }
 
     // be careful that the default value is 0
     this.dictSortDimIdx = new int[dictSortDimCnt];
     this.dictNoSortDimIdx = new int[dictDimCnt - dictSortDimCnt];
     this.noDictSortDimIdx = new int[noDictSortDimCnt];
-    this.noDictNoSortDimIdx = new int[noDictDimCnt + complexDimCnt - noDictSortDimCnt];
+    this.noDictNoSortDimIdx = new int[noDictDimCnt - noDictSortDimCnt - varcharDimCnt];
+    this.complexDimIdx = new int[complexDimCnt];
+    this.varcharDimIdx = new int[varcharDimCnt];
     this.measureIdx = new int[measureCnt];
 
     int tmpNoDictSortCnt = 0;
     int tmpNoDictNoSortCnt = 0;
     int tmpDictSortCnt = 0;
     int tmpDictNoSortCnt = 0;
-    boolean[] isDimNoDictFlags = sortParameters.getNoDictionaryDimnesionColumn();
+    int tmpVarcharCnt = 0;
 
     for (int i = 0; i < isDimNoDictFlags.length; i++) {
       if (isDimNoDictFlags[i]) {
-        if (i < sortColCnt && isSortColNoDictFlags[i]) {
+        if (isVarcharDimFlags[i]) {
+          varcharDimIdx[tmpVarcharCnt++] = i;
+        } else if (sortColumn[i]) {
           noDictSortDimIdx[tmpNoDictSortCnt++] = i;
         } else {
           noDictNoSortDimIdx[tmpNoDictNoSortCnt++] = i;
         }
       } else {
-        if (i < sortColCnt && !isSortColNoDictFlags[i]) {
+        if (sortColumn[i]) {
           dictSortDimIdx[tmpDictSortCnt++] = i;
         } else {
           dictNoSortDimIdx[tmpDictNoSortCnt++] = i;
@@ -95,13 +122,13 @@ public class TableFieldStat implements Serializable {
       }
     }
     dictNoSortDimCnt = tmpDictNoSortCnt;
+    noDictNoSortDimCnt = tmpNoDictNoSortCnt;
 
     int base = isDimNoDictFlags.length;
-    // adding complex dimension columns
+    // indices for complex dimension columns
     for (int i = 0; i < complexDimCnt; i++) {
-      noDictNoSortDimIdx[tmpNoDictNoSortCnt++] = base + i;
+      complexDimIdx[i] = base + i;
     }
-    noDictNoSortDimCnt = tmpNoDictNoSortCnt;
 
     base += complexDimCnt;
     // indices for measure columns
@@ -126,8 +153,20 @@ public class TableFieldStat implements Serializable {
     return noDictNoSortDimCnt;
   }
 
+  public int getComplexDimCnt() {
+    return complexDimCnt;
+  }
+
+  public int getVarcharDimCnt() {
+    return varcharDimCnt;
+  }
+
   public boolean[] getIsSortColNoDictFlags() {
     return isSortColNoDictFlags;
+  }
+
+  public boolean[] getIsVarcharDimFlags() {
+    return isVarcharDimFlags;
   }
 
   public int getMeasureCnt() {
@@ -154,6 +193,14 @@ public class TableFieldStat implements Serializable {
     return noDictNoSortDimIdx;
   }
 
+  public int[] getComplexDimIdx() {
+    return complexDimIdx;
+  }
+
+  public int[] getVarcharDimIdx() {
+    return varcharDimIdx;
+  }
+
   public int[] getMeasureIdx() {
     return measureIdx;
   }
@@ -166,11 +213,26 @@ public class TableFieldStat implements Serializable {
         && dictNoSortDimCnt == that.dictNoSortDimCnt
         && noDictSortDimCnt == that.noDictSortDimCnt
         && noDictNoSortDimCnt == that.noDictNoSortDimCnt
+        && complexDimCnt == that.complexDimCnt
+        && varcharDimCnt == that.varcharDimCnt
         && measureCnt == that.measureCnt;
   }
 
   @Override public int hashCode() {
     return Objects.hash(dictSortDimCnt, dictNoSortDimCnt, noDictSortDimCnt,
-        noDictNoSortDimCnt, measureCnt);
+        noDictNoSortDimCnt, complexDimCnt, varcharDimCnt, measureCnt);
+  }
+
+  public DataType[] getNoDictSortDataType() {
+    return noDictSortDataType;
+  }
+
+  public DataType[] getNoDictNoSortDataType() {
+    return noDictNoSortDataType;
+  }
+
+
+  public DataType[] getNoDictDataType() {
+    return noDictDataType;
   }
 }

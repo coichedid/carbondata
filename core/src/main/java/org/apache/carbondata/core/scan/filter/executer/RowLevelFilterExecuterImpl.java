@@ -29,15 +29,14 @@ import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.cache.dictionary.Dictionary;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.datastore.block.SegmentProperties;
 import org.apache.carbondata.core.datastore.chunk.DimensionColumnPage;
 import org.apache.carbondata.core.datastore.chunk.impl.VariableLengthDimensionColumnPage;
+import org.apache.carbondata.core.datastore.chunk.store.ColumnPageWrapper;
 import org.apache.carbondata.core.datastore.page.ColumnPage;
-import org.apache.carbondata.core.keygenerator.KeyGenException;
 import org.apache.carbondata.core.keygenerator.directdictionary.DirectDictionaryGenerator;
 import org.apache.carbondata.core.keygenerator.directdictionary.DirectDictionaryKeyGeneratorFactory;
 import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier;
@@ -46,8 +45,6 @@ import org.apache.carbondata.core.metadata.datatype.DataTypes;
 import org.apache.carbondata.core.metadata.encoder.Encoding;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonDimension;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonMeasure;
-import org.apache.carbondata.core.scan.executor.infos.KeyStructureInfo;
-import org.apache.carbondata.core.scan.executor.util.QueryUtil;
 import org.apache.carbondata.core.scan.executor.util.RestructureUtil;
 import org.apache.carbondata.core.scan.expression.Expression;
 import org.apache.carbondata.core.scan.expression.MatchExpression;
@@ -65,9 +62,11 @@ import org.apache.carbondata.core.util.ByteUtil;
 import org.apache.carbondata.core.util.CarbonUtil;
 import org.apache.carbondata.core.util.DataTypeUtil;
 
+import org.apache.log4j.Logger;
+
 public class RowLevelFilterExecuterImpl implements FilterExecuter {
 
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(RowLevelFilterExecuterImpl.class.getName());
   List<DimColumnResolvedFilterInfo> dimColEvaluatorInfoList;
   List<MeasureColumnResolvedFilterInfo> msrColEvalutorInfoList;
@@ -80,7 +79,11 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
   int[] dimensionChunkIndex;
 
   /**
-   * it has index at which given measure is stored in file
+   * it has index at which given measure is stored in file.
+   * Note: Its value can be used only for isScanRequired method as the value is incremented by
+   * last dimension ordinal in segmentProperties because of data writing order
+   * (first dimensions are written and then measures). Therefore avoid its usage in in methods other
+   * than isScanRequired
    */
   int[] measureChunkIndex;
 
@@ -124,8 +127,8 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
       this.dimColEvaluatorInfoList = dimColEvaluatorInfoList;
     }
     if (this.dimColEvaluatorInfoList.size() > 0) {
-      this.isDimensionPresentInCurrentBlock = new boolean[dimColEvaluatorInfoList.size()];
-      this.dimensionChunkIndex = new int[dimColEvaluatorInfoList.size()];
+      this.isDimensionPresentInCurrentBlock = new boolean[this.dimColEvaluatorInfoList.size()];
+      this.dimensionChunkIndex = new int[this.dimColEvaluatorInfoList.size()];
     } else {
       this.isDimensionPresentInCurrentBlock = new boolean[]{false};
       this.dimensionChunkIndex = new int[]{0};
@@ -136,8 +139,8 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
       this.msrColEvalutorInfoList = msrColEvalutorInfoList;
     }
     if (this.msrColEvalutorInfoList.size() > 0) {
-      this.isMeasurePresentInCurrentBlock = new boolean[msrColEvalutorInfoList.size()];
-      this.measureChunkIndex = new int[msrColEvalutorInfoList.size()];
+      this.isMeasurePresentInCurrentBlock = new boolean[this.msrColEvalutorInfoList.size()];
+      this.measureChunkIndex = new int[this.msrColEvalutorInfoList.size()];
     } else {
       this.isMeasurePresentInCurrentBlock = new boolean[]{false};
       this.measureChunkIndex = new int[] {0};
@@ -164,8 +167,8 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
           .getDimensionFromCurrentBlock(dimColEvaluatorInfoList.get(i).getDimension());
       if (null != dimensionFromCurrentBlock) {
         dimColEvaluatorInfoList.get(i).setColumnIndex(dimensionFromCurrentBlock.getOrdinal());
-        this.dimensionChunkIndex[i] = segmentProperties.getDimensionOrdinalToChunkMapping()
-            .get(dimensionFromCurrentBlock.getOrdinal());
+        this.dimensionChunkIndex[i] =
+            dimColEvaluatorInfoList.get(i).getColumnIndexInMinMaxByteArray();
         isDimensionPresentInCurrentBlock[i] = true;
       }
     }
@@ -182,8 +185,7 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
           msrColEvalutorInfoList.get(i).getCarbonColumn().getColumnId());
       if (null != measureFromCurrentBlock) {
         msrColEvalutorInfoList.get(i).setColumnIndex(measureFromCurrentBlock.getOrdinal());
-        this.measureChunkIndex[i] = segmentProperties.getMeasuresOrdinalToChunkMapping()
-            .get(measureFromCurrentBlock.getOrdinal());
+        this.measureChunkIndex[i] = msrColEvalutorInfoList.get(i).getColumnIndexInMinMaxByteArray();
         isMeasurePresentInCurrentBlock[i] = true;
       }
     }
@@ -193,7 +195,13 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
   public BitSetGroup applyFilter(RawBlockletColumnChunks rawBlockletColumnChunks,
       boolean useBitsetPipeLine) throws FilterUnsupportedException, IOException {
     if (exp instanceof MatchExpression) {
-      return rawBlockletColumnChunks.getBitSetGroup();
+      BitSetGroup bitSetGroup = rawBlockletColumnChunks.getBitSetGroup();
+      if (bitSetGroup == null) {
+        // It means there are no datamap created on this table
+        throw new FilterUnsupportedException(String.format("%s is not supported on table %s",
+            exp.getFilterExpressionType().name(), tableIdentifier.getTableName()));
+      }
+      return bitSetGroup;
     }
     readColumnChunks(rawBlockletColumnChunks);
     // CHECKSTYLE:ON
@@ -218,10 +226,12 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
     }
     if (msrColEvalutorInfoList.size() > 0) {
       if (isMeasurePresentInCurrentBlock[0]) {
-        pageNumbers = rawBlockletColumnChunks.getMeasureRawColumnChunks()[measureChunkIndex[0]]
-            .getPagesCount();
-        numberOfRows = rawBlockletColumnChunks.getMeasureRawColumnChunks()[measureChunkIndex[0]]
-            .getRowCount();
+        pageNumbers =
+            rawBlockletColumnChunks.getMeasureRawColumnChunks()[msrColEvalutorInfoList.get(0)
+                .getColumnIndex()].getPagesCount();
+        numberOfRows =
+            rawBlockletColumnChunks.getMeasureRawColumnChunks()[msrColEvalutorInfoList.get(0)
+                .getColumnIndex()].getRowCount();
       } else {
         // specific for restructure case where default values need to be filled
         pageNumbers = rawBlockletColumnChunks.getDataBlock().numberOfPages();
@@ -277,6 +287,16 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
       bitSetGroup.setBitSet(set, i);
     }
     return bitSetGroup;
+  }
+
+  @Override
+  public BitSet prunePages(RawBlockletColumnChunks rawBlockletColumnChunks)
+      throws FilterUnsupportedException, IOException {
+    readColumnChunks(rawBlockletColumnChunks);
+    int pages = rawBlockletColumnChunks.getDataBlock().numberOfPages();
+    BitSet bitSet = new BitSet();
+    bitSet.set(0, pages);
+    return bitSet;
   }
 
   @Override
@@ -398,12 +418,11 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
         DimensionColumnPage columnDataChunk =
             blockChunkHolder.getDimensionRawColumnChunks()[dimensionChunkIndex[i]]
                 .decodeColumnPage(pageIndex);
-        if (!dimColumnEvaluatorInfo.getDimension().hasEncoding(Encoding.DICTIONARY)
-            && columnDataChunk instanceof VariableLengthDimensionColumnPage) {
+        if (!dimColumnEvaluatorInfo.getDimension().hasEncoding(Encoding.DICTIONARY) && (
+            columnDataChunk instanceof VariableLengthDimensionColumnPage
+                || columnDataChunk instanceof ColumnPageWrapper)) {
 
-          VariableLengthDimensionColumnPage dimensionColumnDataChunk =
-              (VariableLengthDimensionColumnPage) columnDataChunk;
-          byte[] memberBytes = dimensionColumnDataChunk.getChunkData(index);
+          byte[] memberBytes = columnDataChunk.getChunkData(index);
           if (null != memberBytes) {
             if (Arrays.equals(CarbonCommonConstants.MEMBER_DEFAULT_VAL_ARRAY, memberBytes)) {
               memberBytes = null;
@@ -416,7 +435,7 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
           }
         } else {
           int dictionaryValue = readSurrogatesFromColumnChunk(blockChunkHolder, index, pageIndex,
-              dimColumnEvaluatorInfo, dimensionChunkIndex[i]);
+              dimensionChunkIndex[i]);
           if (dimColumnEvaluatorInfo.getDimension().hasEncoding(Encoding.DICTIONARY)
               && !dimColumnEvaluatorInfo.getDimension().hasEncoding(Encoding.DIRECT_DICTIONARY)) {
             memberString =
@@ -440,7 +459,7 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
           complexType.parseBlocksAndReturnComplexColumnByteArray(
               blockChunkHolder.getDimensionRawColumnChunks(), index, pageIndex, dataOutputStream);
           record[dimColumnEvaluatorInfo.getRowIndex()] = complexType
-              .getDataBasedOnDataTypeFromSurrogates(ByteBuffer.wrap(byteStream.toByteArray()));
+              .getDataBasedOnDataType(ByteBuffer.wrap(byteStream.toByteArray()));
           byteStream.close();
         } catch (IOException e) {
           LOGGER.info(e.getMessage());
@@ -477,8 +496,8 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
 
       Object msrValue;
       ColumnPage columnPage =
-          blockChunkHolder.getMeasureRawColumnChunks()[measureChunkIndex[0]]
-              .decodeColumnPage(pageIndex);
+          blockChunkHolder.getMeasureRawColumnChunks()[msrColEvalutorInfoList.get(0)
+              .getColumnIndex()].decodeColumnPage(pageIndex);
       if (msrType == DataTypes.BOOLEAN) {
         msrValue = columnPage.getBoolean(index);
       } else if (msrType == DataTypes.SHORT) {
@@ -577,48 +596,20 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
    *
    * @param blockChunkHolder
    * @param index
-   * @param dimColumnEvaluatorInfo
    * @return
    */
   private int readSurrogatesFromColumnChunk(RawBlockletColumnChunks blockChunkHolder, int index,
-      int page, DimColumnResolvedFilterInfo dimColumnEvaluatorInfo, int chunkIndex) {
+      int page, int chunkIndex) {
     DimensionColumnPage dataChunk =
         blockChunkHolder.getDimensionRawColumnChunks()[chunkIndex].decodeColumnPage(page);
-    if (dimColumnEvaluatorInfo.getDimension().isColumnar()) {
-      byte[] rawData = dataChunk.getChunkData(index);
-      ByteBuffer byteBuffer = ByteBuffer.allocate(CarbonCommonConstants.INT_SIZE_IN_BYTE);
-      return CarbonUtil.getSurrogateKey(rawData, byteBuffer);
-    } else {
-      return readSurrogatesFromColumnGroupBlock(dataChunk, index, dimColumnEvaluatorInfo);
-    }
-
+    byte[] rawData = dataChunk.getChunkData(index);
+    ByteBuffer byteBuffer = ByteBuffer.allocate(CarbonCommonConstants.INT_SIZE_IN_BYTE);
+    return CarbonUtil.getSurrogateKey(rawData, byteBuffer);
   }
-
-  /**
-   * @param index
-   * @param dimColumnEvaluatorInfo
-   * @return read surrogate of given row of given column group dimension
-   */
-  private int readSurrogatesFromColumnGroupBlock(DimensionColumnPage chunk, int index,
-      DimColumnResolvedFilterInfo dimColumnEvaluatorInfo) {
-    try {
-      KeyStructureInfo keyStructureInfo =
-          QueryUtil.getKeyStructureInfo(segmentProperties, dimColumnEvaluatorInfo);
-      byte[] colData = chunk.getChunkData(index);
-      long[] result = keyStructureInfo.getKeyGenerator().getKeyArray(colData);
-      int colGroupId =
-          QueryUtil.getColumnGroupId(segmentProperties, dimensionChunkIndex[0]);
-      return (int) result[segmentProperties
-          .getColumnGroupMdKeyOrdinal(colGroupId, dimensionChunkIndex[0])];
-    } catch (KeyGenException e) {
-      LOGGER.error(e);
-    }
-    return 0;
-  }
-
 
   @Override
-  public BitSet isScanRequired(byte[][] blockMaxValue, byte[][] blockMinValue) {
+  public BitSet isScanRequired(byte[][] blockMaxValue, byte[][] blockMinValue,
+      boolean[] isMinMaxSet) {
     BitSet bitSet = new BitSet(1);
     bitSet.set(0);
     return bitSet;
@@ -641,13 +632,12 @@ public class RowLevelFilterExecuterImpl implements FilterExecuter {
       }
     }
 
-    if (null != msrColEvalutorInfoList) {
-      for (MeasureColumnResolvedFilterInfo msrColumnEvalutorInfo : msrColEvalutorInfoList) {
-        if (null == rawBlockletColumnChunks.getMeasureRawColumnChunks()[measureChunkIndex[0]]) {
-          rawBlockletColumnChunks.getMeasureRawColumnChunks()[measureChunkIndex[0]] =
-              rawBlockletColumnChunks.getDataBlock()
-                  .readMeasureChunk(rawBlockletColumnChunks.getFileReader(), measureChunkIndex[0]);
-        }
+    for (MeasureColumnResolvedFilterInfo msrColumnEvalutorInfo : msrColEvalutorInfoList) {
+      int chunkIndex = msrColEvalutorInfoList.get(0).getColumnIndex();
+      if (null == rawBlockletColumnChunks.getMeasureRawColumnChunks()[chunkIndex]) {
+        rawBlockletColumnChunks.getMeasureRawColumnChunks()[chunkIndex] =
+            rawBlockletColumnChunks.getDataBlock()
+                .readMeasureChunk(rawBlockletColumnChunks.getFileReader(), chunkIndex);
       }
     }
   }

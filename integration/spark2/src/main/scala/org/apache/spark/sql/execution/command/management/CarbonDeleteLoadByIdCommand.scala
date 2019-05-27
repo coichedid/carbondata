@@ -35,9 +35,10 @@ case class CarbonDeleteLoadByIdCommand(
   override def processData(sparkSession: SparkSession): Seq[Row] = {
     Checker.validateTableExists(databaseNameOp, tableName, sparkSession)
     val carbonTable = CarbonEnv.getCarbonTable(databaseNameOp, tableName)(sparkSession)
-
-    if (carbonTable.getTableInfo.isUnManagedTable) {
-      throw new MalformedCarbonCommandException("Unsupported operation on unmanaged table")
+    setAuditTable(carbonTable)
+    setAuditInfo(Map("segmentIds" -> loadIds.mkString(", ")))
+    if (!carbonTable.getTableInfo.isTransactionalTable) {
+      throw new MalformedCarbonCommandException("Unsupported operation on non transactional table")
     }
 
     // if insert overwrite in progress, do not allow delete segment
@@ -66,4 +67,6 @@ case class CarbonDeleteLoadByIdCommand(
     OperationListenerBus.getInstance.fireEvent(deleteSegmentPostEvent, operationContext)
     Seq.empty
   }
+
+  override protected def opName: String = "DELETE SEGMENT BY ID"
 }

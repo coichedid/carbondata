@@ -19,6 +19,7 @@ package org.apache.carbondata.core.memory;
 
 import javax.annotation.Nullable;
 
+
 /**
  * Code ported from Apache Spark {org.apache.spark.unsafe.memory} package
  * A consecutive block of memory, starting at a {@link MemoryLocation} with a fixed size.
@@ -30,12 +31,18 @@ public class MemoryBlock extends MemoryLocation {
   /**
    * whether freed or not
    */
-  private boolean isFreed = false;
+  private boolean isFreed;
 
-  public MemoryBlock(@Nullable Object obj, long offset, long length) {
+  /**
+   * Whether it is offheap or onheap memory type
+   */
+  private MemoryType memoryType;
+
+  public MemoryBlock(@Nullable Object obj, long offset, long length, MemoryType memoryType) {
     super(obj, offset);
     this.length = length;
     this.isFreed = false;
+    this.memoryType = memoryType;
   }
 
   /**
@@ -53,4 +60,7 @@ public class MemoryBlock extends MemoryLocation {
     this.isFreed = freedStatus;
   }
 
+  public MemoryType getMemoryType() {
+    return memoryType;
+  }
 }

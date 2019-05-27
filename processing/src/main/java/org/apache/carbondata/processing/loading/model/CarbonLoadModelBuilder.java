@@ -29,25 +29,30 @@ import org.apache.carbondata.common.Strings;
 import org.apache.carbondata.common.annotations.InterfaceAudience;
 import org.apache.carbondata.common.constants.LoggerAction;
 import org.apache.carbondata.common.exceptions.sql.InvalidLoadOptionException;
+import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
+import org.apache.carbondata.core.constants.SortScopeOptions;
+import org.apache.carbondata.core.datastore.compression.CompressorFactory;
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonColumn;
 import org.apache.carbondata.core.util.CarbonProperties;
 import org.apache.carbondata.core.util.CarbonUtil;
 import org.apache.carbondata.processing.loading.constants.DataLoadProcessorConstants;
 import org.apache.carbondata.processing.loading.csvinput.CSVInputFormat;
-import org.apache.carbondata.processing.loading.sort.SortScopeOptions;
+import org.apache.carbondata.processing.util.CarbonBadRecordUtil;
 import org.apache.carbondata.processing.util.TableOptionConstant;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.log4j.Logger;
 
 /**
  * Builder for {@link CarbonLoadModel}
  */
 @InterfaceAudience.Internal
 public class CarbonLoadModelBuilder {
-
+  private static final Logger LOGGER = LogServiceFactory.getLogService(
+      CarbonLoadModelBuilder.class.getName());
   private CarbonTable table;
 
   public CarbonLoadModelBuilder(CarbonTable table) {
@@ -57,10 +62,11 @@ public class CarbonLoadModelBuilder {
   /**
    * build CarbonLoadModel for data loading
    * @param options Load options from user input
+   * @param taskNo
    * @return a new CarbonLoadModel instance
    */
-  public CarbonLoadModel build(
-      Map<String, String> options, long UUID) throws InvalidLoadOptionException, IOException {
+  public CarbonLoadModel build(Map<String, String>  options, long timestamp, String taskNo)
+      throws InvalidLoadOptionException, IOException {
     Map<String, String> optionsFinal = LoadOption.fillOptionWithDefaultValue(options);
 
     if (!options.containsKey("fileheader")) {
@@ -71,17 +77,30 @@ public class CarbonLoadModelBuilder {
       }
       optionsFinal.put("fileheader", Strings.mkString(columns, ","));
     }
+    optionsFinal.put("bad_record_path", CarbonBadRecordUtil.getBadRecordsPath(options, table));
+    optionsFinal.put("sort_scope",
+        Maps.getOrDefault(options, "sort_scope", CarbonCommonConstants.LOAD_SORT_SCOPE_DEFAULT));
     CarbonLoadModel model = new CarbonLoadModel();
-    model.setCarbonUnmanagedTable(table.isUnManagedTable());
-    model.setFactTimeStamp(UUID);
+    model.setCarbonTransactionalTable(table.isTransactionalTable());
+    model.setFactTimeStamp(timestamp);
+    model.setTaskNo(taskNo);
 
     // we have provided 'fileheader', so it hadoopConf can be null
     build(options, optionsFinal, model, null);
-
-
-    // set default values
-    model.setTimestampformat(CarbonCommonConstants.CARBON_TIMESTAMP_DEFAULT_FORMAT);
-    model.setDateFormat(CarbonCommonConstants.CARBON_DATE_DEFAULT_FORMAT);
+    String timestampFormat = options.get("timestampformat");
+    if (timestampFormat == null) {
+      timestampFormat = CarbonProperties.getInstance()
+          .getProperty(CarbonCommonConstants.CARBON_TIMESTAMP_FORMAT,
+              CarbonCommonConstants.CARBON_TIMESTAMP_DEFAULT_FORMAT);
+    }
+    String dateFormat = options.get("dateFormat");
+    if (dateFormat == null) {
+      dateFormat = CarbonProperties.getInstance()
+          .getProperty(CarbonCommonConstants.CARBON_DATE_FORMAT,
+              CarbonCommonConstants.CARBON_DATE_DEFAULT_FORMAT);
+    }
+    model.setDateFormat(dateFormat);
+    model.setTimestampformat(timestampFormat);
     model.setUseOnePass(Boolean.parseBoolean(Maps.getOrDefault(options, "onepass", "false")));
     model.setDictionaryServerHost(Maps.getOrDefault(options, "dicthost", null));
     try {
@@ -89,6 +108,7 @@ public class CarbonLoadModelBuilder {
     } catch (NumberFormatException e) {
       throw new InvalidLoadOptionException(e.getMessage());
     }
+    validateAndSetColumnCompressor(model);
     return model;
   }
 
@@ -129,6 +149,7 @@ public class CarbonLoadModelBuilder {
     carbonLoadModel.setDatabaseName(table.getDatabaseName());
     carbonLoadModel.setTablePath(table.getTablePath());
     carbonLoadModel.setTableName(table.getTableName());
+    carbonLoadModel.setCarbonTransactionalTable(table.isTransactionalTable());
     CarbonDataLoadSchema dataLoadSchema = new CarbonDataLoadSchema(table);
     // Need to fill dimension relation
     carbonLoadModel.setCarbonDataLoadSchema(dataLoadSchema);
@@ -151,10 +172,12 @@ public class CarbonLoadModelBuilder {
 
     if (Boolean.parseBoolean(bad_records_logger_enable) ||
         LoggerAction.REDIRECT.name().equalsIgnoreCase(bad_records_action)) {
-      if (!CarbonUtil.isValidBadStorePath(bad_record_path)) {
-        throw new InvalidLoadOptionException("Invalid bad records location.");
+      if (!StringUtils.isEmpty(bad_record_path)) {
+        bad_record_path = CarbonUtil.checkAndAppendHDFSUrl(bad_record_path);
+      } else {
+        throw new InvalidLoadOptionException(
+            "Cannot redirect bad records as bad record location is not provided.");
       }
-      bad_record_path = CarbonUtil.checkAndAppendHDFSUrl(bad_record_path);
     }
 
     carbonLoadModel.setBadRecordsLocation(bad_record_path);
@@ -183,11 +206,18 @@ public class CarbonLoadModelBuilder {
       } else {
         if (StringUtils.isEmpty(fileHeader)) {
           List<CarbonColumn> columns = table.getCreateOrderColumn(table.getTableName());
-          String[] columnNames = new String[columns.size()];
-          for (int i = 0; i < columnNames.length; i++) {
-            columnNames[i] = columns.get(i).getColName();
+          List<String> columnNames = new ArrayList<>();
+          List<String> partitionColumns = new ArrayList<>();
+          for (int i = 0; i < columns.size(); i++) {
+            if (table.getPartitionInfo() != null && table.getPartitionInfo().getColumnSchemaList()
+                .contains(columns.get(i).getColumnSchema())) {
+              partitionColumns.add(columns.get(i).getColName());
+            } else {
+              columnNames.add(columns.get(i).getColName());
+            }
           }
-          fileHeader = Strings.mkString(columnNames, ",");
+          columnNames.addAll(partitionColumns);
+          fileHeader = Strings.mkString(columnNames.toArray(new String[columnNames.size()]), ",");
         }
       }
     }
@@ -256,8 +286,15 @@ public class CarbonLoadModelBuilder {
         optionsFinal.get("maxcolumns"));
 
     carbonLoadModel.setMaxColumns(String.valueOf(validatedMaxColumns));
-    carbonLoadModel.readAndSetLoadMetadataDetails();
+    if (carbonLoadModel.isCarbonTransactionalTable()) {
+      carbonLoadModel.readAndSetLoadMetadataDetails();
+    }
     carbonLoadModel.setSortColumnsBoundsStr(optionsFinal.get("sort_column_bounds"));
+    carbonLoadModel.setLoadMinSize(
+        optionsFinal.get(CarbonCommonConstants.CARBON_LOAD_MIN_SIZE_INMB));
+    validateAndSetLoadMinSize(carbonLoadModel);
+
+    validateAndSetColumnCompressor(carbonLoadModel);
   }
 
   private int validateMaxColumns(String[] csvHeaders, String maxColumns)
@@ -347,6 +384,23 @@ public class CarbonLoadModelBuilder {
     }
   }
 
+  private void validateAndSetColumnCompressor(CarbonLoadModel carbonLoadModel)
+      throws InvalidLoadOptionException {
+    try {
+      String columnCompressor = carbonLoadModel.getColumnCompressor();
+      if (StringUtils.isBlank(columnCompressor)) {
+        columnCompressor = CarbonProperties.getInstance().getProperty(
+            CarbonCommonConstants.COMPRESSOR, CarbonCommonConstants.DEFAULT_COMPRESSOR);
+      }
+      // check and load compressor
+      CompressorFactory.getInstance().getCompressor(columnCompressor);
+      carbonLoadModel.setColumnCompressor(columnCompressor);
+    } catch (Exception e) {
+      LOGGER.error(e);
+      throw new InvalidLoadOptionException("Failed to load the compressor");
+    }
+  }
+
   /**
    * check whether using default value or not
    */
@@ -355,6 +409,22 @@ public class CarbonLoadModelBuilder {
       return defaultValue;
     } else {
       return value;
+    }
+  }
+
+  private void validateAndSetLoadMinSize(CarbonLoadModel carbonLoadModel) {
+    int size = 0;
+    String loadMinSize = carbonLoadModel.getLoadMinSize();
+    try {
+      size = Integer.parseInt(loadMinSize);
+    } catch (Exception e) {
+      size = 0;
+    }
+    // if the value is negative, set the value is 0
+    if (size > 0) {
+      carbonLoadModel.setLoadMinSize(loadMinSize);
+    } else {
+      carbonLoadModel.setLoadMinSize(CarbonCommonConstants.CARBON_LOAD_MIN_SIZE_INMB_DEFAULT);
     }
   }
 }

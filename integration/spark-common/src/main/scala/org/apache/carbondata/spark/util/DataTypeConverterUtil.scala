@@ -46,6 +46,7 @@ object DataTypeConverterUtil {
       case "date" => DataTypes.DATE
       case "array" => DataTypes.createDefaultArrayType
       case "struct" => DataTypes.createDefaultStructType
+      case "map" => DataTypes.createDefaultMapType
       case _ => convertToCarbonTypeForSpark2(dataType)
     }
   }
@@ -72,6 +73,8 @@ object DataTypeConverterUtil {
           DataTypes.createDefaultArrayType()
         } else if (others != null && others.startsWith("structtype")) {
           DataTypes.createDefaultStructType()
+        } else if (others != null && others.startsWith("maptype")) {
+          DataTypes.createDefaultMapType
         } else if (others != null && others.startsWith("char")) {
           DataTypes.STRING
         } else if (others != null && others.startsWith("varchar")) {
@@ -79,28 +82,6 @@ object DataTypeConverterUtil {
         } else {
           CarbonException.analysisException(s"Unsupported data type: $dataType")
         }
-    }
-  }
-
-  def convertToString(dataType: DataType): String = {
-    if (DataTypes.isDecimal(dataType)) {
-      "decimal"
-    } else if (DataTypes.isArrayType(dataType)) {
-      "array"
-    } else if (DataTypes.isStructType(dataType)) {
-      "struct"
-    } else {
-      dataType match {
-        case DataTypes.BOOLEAN => "boolean"
-      case DataTypes.STRING => "string"
-        case DataTypes.SHORT => "smallint"
-        case DataTypes.INT => "int"
-        case DataTypes.LONG => "bigint"
-        case DataTypes.DOUBLE => "double"
-        case DataTypes.FLOAT => "double"
-        case DataTypes.TIMESTAMP => "timestamp"
-        case DataTypes.DATE => "date"
-      }
     }
   }
 
@@ -126,6 +107,8 @@ object DataTypeConverterUtil {
       case "timestamp" => ThriftDataType.TIMESTAMP
       case "array" => ThriftDataType.ARRAY
       case "struct" => ThriftDataType.STRUCT
+      case "map" => ThriftDataType.MAP
+      case "varchar" => ThriftDataType.VARCHAR
       case _ => ThriftDataType.STRING
     }
   }

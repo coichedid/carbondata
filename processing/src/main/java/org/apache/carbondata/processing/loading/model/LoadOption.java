@@ -27,7 +27,6 @@ import java.util.Map;
 import org.apache.carbondata.common.Maps;
 import org.apache.carbondata.common.annotations.InterfaceAudience;
 import org.apache.carbondata.common.exceptions.sql.InvalidLoadOptionException;
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.constants.CarbonLoadOptionConstants;
@@ -39,6 +38,7 @@ import org.apache.carbondata.processing.util.CarbonLoaderUtil;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.log4j.Logger;
 
 /**
  * Provide utilities to populate loading options
@@ -46,7 +46,7 @@ import org.apache.hadoop.conf.Configuration;
 @InterfaceAudience.Internal
 public class LoadOption {
 
-  private static LogService LOG = LogServiceFactory.getLogService(LoadOption.class.getName());
+  private static final Logger LOG = LogServiceFactory.getLogService(LoadOption.class.getName());
 
   /**
    * Based on the input options, fill and return data loading options with default value
@@ -159,17 +159,6 @@ public class LoadOption {
                     CarbonCommonConstants.LOAD_BATCH_SORT_SIZE_INMB,
                     CarbonCommonConstants.LOAD_BATCH_SORT_SIZE_INMB_DEFAULT))));
 
-    optionsFinal.put(
-        "bad_record_path",
-        Maps.getOrDefault(
-            options,
-            "bad_record_path",
-            CarbonProperties.getInstance().getProperty(
-                CarbonLoadOptionConstants.CARBON_OPTIONS_BAD_RECORD_PATH,
-                CarbonProperties.getInstance().getProperty(
-                    CarbonCommonConstants.CARBON_BADRECORDS_LOC,
-                    CarbonCommonConstants.CARBON_BADRECORDS_LOC_DEFAULT_VAL))));
-
     String useOnePass = Maps.getOrDefault(
         options,
         "single_pass",
@@ -196,6 +185,9 @@ public class LoadOption {
     optionsFinal.put("single_pass", String.valueOf(singlePass));
     optionsFinal.put("sort_scope", "local_sort");
     optionsFinal.put("sort_column_bounds", Maps.getOrDefault(options, "sort_column_bounds", ""));
+    optionsFinal.put(CarbonCommonConstants.CARBON_LOAD_MIN_SIZE_INMB,
+        Maps.getOrDefault(options, CarbonCommonConstants.CARBON_LOAD_MIN_SIZE_INMB,
+            CarbonCommonConstants.CARBON_LOAD_MIN_SIZE_INMB_DEFAULT));
     return optionsFinal;
   }
 
@@ -244,7 +236,9 @@ public class LoadOption {
       }
     }
 
-    if (!carbonLoadModel.isCarbonUnmanagedTable() && !CarbonDataProcessorUtil
+    // In SDK flow, hadoopConf will always be null,
+    // hence FileHeader check is not required for nontransactional table
+    if (hadoopConf != null && !CarbonDataProcessorUtil
         .isHeaderValid(carbonLoadModel.getTableName(), csvColumns,
             carbonLoadModel.getCarbonDataLoadSchema(), staticPartitionCols)) {
       if (csvFile == null) {

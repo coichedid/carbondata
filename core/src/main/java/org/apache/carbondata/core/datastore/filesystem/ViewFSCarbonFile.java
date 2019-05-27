@@ -20,22 +20,20 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.datastore.impl.FileFactory;
 
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.viewfs.ViewFileSystem;
+import org.apache.log4j.Logger;
 
 public class ViewFSCarbonFile extends AbstractDFSCarbonFile {
   /**
    * LOGGER
    */
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(ViewFSCarbonFile.class.getName());
 
   public ViewFSCarbonFile(String filePath) {
@@ -67,17 +65,6 @@ public class ViewFSCarbonFile extends AbstractDFSCarbonFile {
   }
 
   @Override
-  protected List<CarbonFile> getFiles(RemoteIterator<LocatedFileStatus> listStatus)
-      throws IOException {
-    List<CarbonFile> carbonFiles = new ArrayList<>();
-    while (listStatus.hasNext()) {
-      Path filePath = listStatus.next().getPath();
-      carbonFiles.add(new ViewFSCarbonFile(filePath));
-    }
-    return carbonFiles;
-  }
-
-  @Override
   public CarbonFile[] listFiles(final CarbonFileFilter fileFilter) {
     CarbonFile[] files = listFiles();
     if (files != null && files.length >= 1) {
@@ -102,13 +89,13 @@ public class ViewFSCarbonFile extends AbstractDFSCarbonFile {
   }
 
   @Override
-  public boolean renameForce(String changetoName) {
+  public boolean renameForce(String changeToName) {
     FileSystem fs;
     try {
       fs = fileStatus.getPath().getFileSystem(FileFactory.getConfiguration());
       if (fs instanceof ViewFileSystem) {
-        fs.delete(new Path(changetoName), true);
-        fs.rename(fileStatus.getPath(), new Path(changetoName));
+        fs.delete(new Path(changeToName), true);
+        fs.rename(fileStatus.getPath(), new Path(changeToName));
         return true;
       } else {
         return false;

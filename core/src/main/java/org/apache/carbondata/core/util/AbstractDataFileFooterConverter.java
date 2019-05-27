@@ -19,6 +19,7 @@ package org.apache.carbondata.core.util;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
@@ -43,13 +44,22 @@ import org.apache.carbondata.core.metadata.schema.table.RelationIdentifier;
 import org.apache.carbondata.core.metadata.schema.table.column.ColumnSchema;
 import org.apache.carbondata.core.metadata.schema.table.column.ParentColumnTableRelation;
 import org.apache.carbondata.core.reader.CarbonIndexFileReader;
+import org.apache.carbondata.core.scan.executor.util.QueryUtil;
 import org.apache.carbondata.core.util.path.CarbonTablePath;
 import org.apache.carbondata.format.BlockIndex;
+
+import org.apache.hadoop.conf.Configuration;
 
 /**
  * Footer reader class
  */
 public abstract class AbstractDataFileFooterConverter {
+
+  protected Configuration configuration;
+
+  AbstractDataFileFooterConverter(Configuration configuration) {
+    this.configuration = configuration;
+  }
 
   /**
    * Below method will be used to convert the thrift presence meta to wrapper
@@ -60,7 +70,12 @@ public abstract class AbstractDataFileFooterConverter {
    */
   private static BitSet getPresenceMeta(
       org.apache.carbondata.format.PresenceMeta presentMetadataThrift) {
-    return BitSet.valueOf(presentMetadataThrift.getPresent_bit_stream());
+    final byte[] present_bit_stream = presentMetadataThrift.getPresent_bit_stream();
+    if (null != present_bit_stream) {
+      return BitSet.valueOf(present_bit_stream);
+    } else {
+      return new BitSet(1);
+    }
   }
 
   /**
@@ -71,7 +86,8 @@ public abstract class AbstractDataFileFooterConverter {
    * @return list of index info
    * @throws IOException problem while reading the index file
    */
-  public List<DataFileFooter> getIndexInfo(String filePath, List<TableBlockInfo> tableBlockInfoList)
+  public List<DataFileFooter> getIndexInfo(String filePath, List<TableBlockInfo>
+      tableBlockInfoList)
       throws IOException {
     CarbonIndexFileReader indexReader = new CarbonIndexFileReader();
     List<DataFileFooter> dataFileFooters = new ArrayList<DataFileFooter>();
@@ -84,7 +100,7 @@ public abstract class AbstractDataFileFooterConverter {
       List<org.apache.carbondata.format.ColumnSchema> table_columns =
           readIndexHeader.getTable_columns();
       for (int i = 0; i < table_columns.size(); i++) {
-        columnSchemaList.add(thriftColumnSchmeaToWrapperColumnSchema(table_columns.get(i)));
+        columnSchemaList.add(thriftColumnSchemaToWrapperColumnSchema(table_columns.get(i)));
       }
       // get the segment info
       SegmentInfo segmentInfo = getSegmentInfo(readIndexHeader.getSegment_info());
@@ -130,7 +146,15 @@ public abstract class AbstractDataFileFooterConverter {
    * @throws IOException problem while reading the index file
    */
   public List<DataFileFooter> getIndexInfo(String filePath, byte[] fileData) throws IOException {
-    CarbonIndexFileReader indexReader = new CarbonIndexFileReader();
+    return getIndexInfo(filePath, fileData, true);
+  }
+
+  /**
+   * Below method will be used to get the index info from index file
+   */
+  public List<DataFileFooter> getIndexInfo(String filePath, byte[] fileData,
+      boolean isTransactionalTable) throws IOException {
+    CarbonIndexFileReader indexReader = new CarbonIndexFileReader(configuration);
     List<DataFileFooter> dataFileFooters = new ArrayList<DataFileFooter>();
     String parentPath = filePath.substring(0, filePath.lastIndexOf("/"));
     try {
@@ -146,7 +170,10 @@ public abstract class AbstractDataFileFooterConverter {
       List<org.apache.carbondata.format.ColumnSchema> table_columns =
           readIndexHeader.getTable_columns();
       for (int i = 0; i < table_columns.size(); i++) {
-        columnSchemaList.add(thriftColumnSchmeaToWrapperColumnSchema(table_columns.get(i)));
+        columnSchemaList.add(thriftColumnSchemaToWrapperColumnSchema(table_columns.get(i)));
+      }
+      if (!isTransactionalTable) {
+        QueryUtil.updateColumnUniqueIdForNonTransactionTable(columnSchemaList);
       }
       // get the segment info
       SegmentInfo segmentInfo = getSegmentInfo(readIndexHeader.getSegment_info());
@@ -171,7 +198,7 @@ public abstract class AbstractDataFileFooterConverter {
         }
         if (readBlockIndexInfo.isSetBlocklet_info()) {
           List<BlockletInfo> blockletInfoList = new ArrayList<BlockletInfo>();
-          BlockletInfo blockletInfo = new DataFileFooterConverterV3()
+          BlockletInfo blockletInfo = new DataFileFooterConverterV3(configuration)
               .getBlockletInfo(readBlockIndexInfo.getBlocklet_info(),
                   CarbonUtil.getNumberOfDimensionColumns(columnSchemaList));
           blockletInfo.setBlockletIndex(blockletIndex);
@@ -259,10 +286,21 @@ public abstract class AbstractDataFileFooterConverter {
     byte[][] currentMaxValue = blockletIndexList.get(0).getMinMaxIndex().getMaxValues().clone();
     byte[][] minValue = null;
     byte[][] maxValue = null;
+    boolean[] blockletMinMaxFlag = null;
+    // flag at block level
+    boolean[] blockMinMaxFlag = blockletIndexList.get(0).getMinMaxIndex().getIsMinMaxSet();
     for (int i = 1; i < blockletIndexList.size(); i++) {
       minValue = blockletIndexList.get(i).getMinMaxIndex().getMinValues();
       maxValue = blockletIndexList.get(i).getMinMaxIndex().getMaxValues();
+      blockletMinMaxFlag = blockletIndexList.get(i).getMinMaxIndex().getIsMinMaxSet();
       for (int j = 0; j < maxValue.length; j++) {
+        // can be null for stores < 1.5.0 version
+        if (null != blockletMinMaxFlag && !blockletMinMaxFlag[j]) {
+          blockMinMaxFlag[j] = blockletMinMaxFlag[j];
+          currentMaxValue[j] = new byte[0];
+          currentMinValue[j] = new byte[0];
+          continue;
+        }
         if (ByteUtil.UnsafeComparer.INSTANCE.compareTo(currentMinValue[j], minValue[j]) > 0) {
           currentMinValue[j] = minValue[j].clone();
         }
@@ -271,21 +309,24 @@ public abstract class AbstractDataFileFooterConverter {
         }
       }
     }
-
+    if (null == blockMinMaxFlag) {
+      blockMinMaxFlag = new boolean[currentMaxValue.length];
+      Arrays.fill(blockMinMaxFlag, true);
+    }
     BlockletMinMaxIndex minMax = new BlockletMinMaxIndex();
     minMax.setMaxValues(currentMaxValue);
     minMax.setMinValues(currentMinValue);
+    minMax.setIsMinMaxSet(blockMinMaxFlag);
     blockletIndex.setMinMaxIndex(minMax);
     return blockletIndex;
   }
 
-  protected ColumnSchema thriftColumnSchmeaToWrapperColumnSchema(
+  protected ColumnSchema thriftColumnSchemaToWrapperColumnSchema(
       org.apache.carbondata.format.ColumnSchema externalColumnSchema) {
     ColumnSchema wrapperColumnSchema = new ColumnSchema();
     wrapperColumnSchema.setColumnUniqueId(externalColumnSchema.getColumn_id());
     wrapperColumnSchema.setColumnName(externalColumnSchema.getColumn_name());
-    wrapperColumnSchema.setColumnar(externalColumnSchema.isColumnar());
-    DataType dataType = thriftDataTyopeToWrapperDataType(externalColumnSchema.data_type);
+    DataType dataType = CarbonUtil.thriftDataTypeToWrapperDataType(externalColumnSchema.data_type);
     if (DataTypes.isDecimal(dataType)) {
       DecimalType decimalType = (DecimalType) dataType;
       decimalType.setPrecision(externalColumnSchema.getPrecision());
@@ -300,7 +341,6 @@ public abstract class AbstractDataFileFooterConverter {
     wrapperColumnSchema.setEncodingList(encoders);
     wrapperColumnSchema.setNumberOfChild(externalColumnSchema.getNum_child());
     wrapperColumnSchema.setPrecision(externalColumnSchema.getPrecision());
-    wrapperColumnSchema.setColumnGroup(externalColumnSchema.getColumn_group_id());
     wrapperColumnSchema.setScale(externalColumnSchema.getScale());
     wrapperColumnSchema.setDefaultValue(externalColumnSchema.getDefault_value());
     Map<String, String> properties = externalColumnSchema.getColumnProperties();
@@ -394,46 +434,19 @@ public abstract class AbstractDataFileFooterConverter {
         blockletIndexThrift.getB_tree_index();
     org.apache.carbondata.format.BlockletMinMaxIndex minMaxIndex =
         blockletIndexThrift.getMin_max_index();
+    List<Boolean> isMinMaxSet = null;
+    // Below logic is added to handle backward compatibility
+    if (minMaxIndex.isSetMin_max_presence()) {
+      isMinMaxSet = minMaxIndex.getMin_max_presence();
+    } else {
+      Boolean[] minMaxFlag = new Boolean[minMaxIndex.getMax_values().size()];
+      Arrays.fill(minMaxFlag, true);
+      isMinMaxSet = Arrays.asList(minMaxFlag);
+    }
     return new BlockletIndex(
         new BlockletBTreeIndex(btreeIndex.getStart_key(), btreeIndex.getEnd_key()),
-        new BlockletMinMaxIndex(minMaxIndex.getMin_values(), minMaxIndex.getMax_values()));
-  }
-
-  /**
-   * Below method will be used to convert the thrift data type to wrapper data
-   * type
-   *
-   * @param dataTypeThrift
-   * @return dataType wrapper
-   */
-  protected DataType thriftDataTyopeToWrapperDataType(
-      org.apache.carbondata.format.DataType dataTypeThrift) {
-    switch (dataTypeThrift) {
-      case BOOLEAN:
-        return DataTypes.BOOLEAN;
-      case STRING:
-        return DataTypes.STRING;
-      case SHORT:
-        return DataTypes.SHORT;
-      case INT:
-        return DataTypes.INT;
-      case LONG:
-        return DataTypes.LONG;
-      case DOUBLE:
-        return DataTypes.DOUBLE;
-      case DECIMAL:
-        return DataTypes.createDefaultDecimalType();
-      case DATE:
-        return DataTypes.DATE;
-      case TIMESTAMP:
-        return DataTypes.TIMESTAMP;
-      case ARRAY:
-        return DataTypes.createDefaultArrayType();
-      case STRUCT:
-        return DataTypes.createDefaultStructType();
-      default:
-        return DataTypes.STRING;
-    }
+        new BlockletMinMaxIndex(minMaxIndex.getMin_values(), minMaxIndex.getMax_values(),
+            isMinMaxSet));
   }
 
   /**

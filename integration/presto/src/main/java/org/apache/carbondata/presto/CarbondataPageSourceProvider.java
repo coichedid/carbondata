@@ -18,8 +18,9 @@
 package org.apache.carbondata.presto;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.List;
+
+import static java.util.Objects.requireNonNull;
 
 import org.apache.carbondata.common.CarbonIterator;
 import org.apache.carbondata.core.datastore.block.TableBlockInfo;
@@ -31,12 +32,16 @@ import org.apache.carbondata.core.scan.executor.exception.QueryExecutionExceptio
 import org.apache.carbondata.core.scan.expression.Expression;
 import org.apache.carbondata.core.scan.model.QueryModel;
 import org.apache.carbondata.core.scan.result.iterator.AbstractDetailQueryResultIterator;
+import org.apache.carbondata.core.util.CarbonTimeStatisticsFactory;
 import org.apache.carbondata.hadoop.CarbonInputSplit;
+import org.apache.carbondata.hadoop.CarbonMultiBlockSplit;
 import org.apache.carbondata.hadoop.CarbonProjection;
 import org.apache.carbondata.hadoop.api.CarbonTableInputFormat;
-import org.apache.carbondata.presto.impl.CarbonLocalInputSplit;
+import org.apache.carbondata.presto.impl.CarbonLocalMultiBlockSplit;
 import org.apache.carbondata.presto.impl.CarbonTableCacheModel;
 import org.apache.carbondata.presto.impl.CarbonTableReader;
+
+import static org.apache.carbondata.presto.Types.checkType;
 
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorPageSource;
@@ -54,8 +59,7 @@ import org.apache.hadoop.mapreduce.TaskType;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
-import static java.util.Objects.requireNonNull;
-import static org.apache.carbondata.presto.Types.checkType;
+
 
 /**
  * Provider Class for Carbondata Page Source class.
@@ -64,25 +68,25 @@ public class CarbondataPageSourceProvider implements ConnectorPageSourceProvider
 
   private String connectorId;
   private CarbonTableReader carbonTableReader;
+  private String queryId ;
 
   @Inject public CarbondataPageSourceProvider(CarbondataConnectorId connectorId,
       CarbonTableReader carbonTableReader) {
     this.connectorId = requireNonNull(connectorId, "connectorId is null").toString();
     this.carbonTableReader = requireNonNull(carbonTableReader, "carbonTableReader is null");
-
   }
 
   @Override
   public ConnectorPageSource createPageSource(ConnectorTransactionHandle transactionHandle,
       ConnectorSession session, ConnectorSplit split, List<ColumnHandle> columns) {
+    this.queryId = ((CarbondataSplit)split).getQueryId();
     CarbonDictionaryDecodeReadSupport readSupport = new CarbonDictionaryDecodeReadSupport();
-    PrestoCarbonVectorizedRecordReader carbonRecordReader = createReader(split, columns, readSupport);
-    return new CarbondataPageSource(readSupport, carbonRecordReader, columns );
+    PrestoCarbonVectorizedRecordReader carbonRecordReader =
+        createReader(split, columns, readSupport);
+    return new CarbondataPageSource(carbonRecordReader, columns);
   }
 
-
   /**
-   *
    * @param split
    * @param columns
    * @param readSupport
@@ -96,12 +100,16 @@ public class CarbondataPageSourceProvider implements ConnectorPageSourceProvider
     checkArgument(carbondataSplit.getConnectorId().equals(connectorId),
         "split is not for this connector");
     QueryModel queryModel = createQueryModel(carbondataSplit, columns);
-    QueryExecutor queryExecutor = QueryExecutorFactory.getQueryExecutor(queryModel);
+    QueryExecutor queryExecutor =
+        QueryExecutorFactory.getQueryExecutor(queryModel, new Configuration());
     try {
       CarbonIterator iterator = queryExecutor.execute(queryModel);
       readSupport.initialize(queryModel.getProjectionColumns(), queryModel.getTable());
-      return new PrestoCarbonVectorizedRecordReader(queryExecutor, queryModel,
-          (AbstractDetailQueryResultIterator) iterator);
+      PrestoCarbonVectorizedRecordReader reader =
+          new PrestoCarbonVectorizedRecordReader(queryExecutor, queryModel,
+              (AbstractDetailQueryResultIterator) iterator, readSupport);
+      reader.setTaskId(carbondataSplit.getIndex());
+      return reader;
     } catch (IOException e) {
       throw new RuntimeException("Unable to get the Query Model ", e);
     } catch (QueryExecutionException e) {
@@ -112,7 +120,6 @@ public class CarbondataPageSourceProvider implements ConnectorPageSourceProvider
   }
 
   /**
-   *
    * @param carbondataSplit
    * @param columns
    * @return
@@ -129,23 +136,25 @@ public class CarbondataPageSourceProvider implements ConnectorPageSourceProvider
       String carbonTablePath = carbonTable.getAbsoluteTableIdentifier().getTablePath();
 
       conf.set(CarbonTableInputFormat.INPUT_DIR, carbonTablePath);
+      conf.set("query.id", queryId);
       JobConf jobConf = new JobConf(conf);
       CarbonTableInputFormat carbonTableInputFormat = createInputFormat(jobConf, carbonTable,
           PrestoFilterUtil.parseFilterExpression(carbondataSplit.getConstraints()),
           carbonProjection);
       TaskAttemptContextImpl hadoopAttemptContext =
           new TaskAttemptContextImpl(jobConf, new TaskAttemptID("", 1, TaskType.MAP, 0, 0));
-      CarbonInputSplit carbonInputSplit =
-          CarbonLocalInputSplit.convertSplit(carbondataSplit.getLocalInputSplit());
+      CarbonMultiBlockSplit carbonInputSplit =
+          CarbonLocalMultiBlockSplit.convertSplit(carbondataSplit.getLocalInputSplit());
       QueryModel queryModel =
           carbonTableInputFormat.createQueryModel(carbonInputSplit, hadoopAttemptContext);
+      queryModel.setQueryId(queryId);
       queryModel.setVectorReader(true);
+      queryModel.setStatisticsRecorder(
+          CarbonTimeStatisticsFactory.createExecutorRecorder(queryModel.getQueryId()));
 
-      List<CarbonInputSplit> splitList = new ArrayList<>(1);
-      splitList.add(carbonInputSplit);
-      List<TableBlockInfo> tableBlockInfoList = CarbonInputSplit.createBlocks(splitList);
+      List<TableBlockInfo> tableBlockInfoList =
+          CarbonInputSplit.createBlocks(carbonInputSplit.getAllSplits());
       queryModel.setTableBlockInfos(tableBlockInfoList);
-
       return queryModel;
     } catch (IOException e) {
       throw new RuntimeException("Unable to get the Query Model ", e);
@@ -153,7 +162,6 @@ public class CarbondataPageSourceProvider implements ConnectorPageSourceProvider
   }
 
   /**
-   *
    * @param conf
    * @param carbonTable
    * @param filterExpression
@@ -181,9 +189,7 @@ public class CarbondataPageSourceProvider implements ConnectorPageSourceProvider
     return format;
   }
 
-
   /**
-   *
    * @param columns
    * @return
    */
@@ -199,7 +205,6 @@ public class CarbondataPageSourceProvider implements ConnectorPageSourceProvider
   }
 
   /**
-   *
    * @param carbonSplit
    * @return
    */
@@ -212,6 +217,5 @@ public class CarbondataPageSourceProvider implements ConnectorPageSourceProvider
         "tableCacheModel.carbonTable.tableInfo should not be null");
     return tableCacheModel.carbonTable;
   }
-
 
 }

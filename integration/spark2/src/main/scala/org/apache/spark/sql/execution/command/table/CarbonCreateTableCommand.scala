@@ -26,12 +26,14 @@ import org.apache.spark.sql.execution.command.MetadataCommand
 
 import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.constants.CarbonCommonConstants
+import org.apache.carbondata.core.datastore.compression.CompressorFactory
+import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.exception.InvalidConfigurationException
 import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier
 import org.apache.carbondata.core.metadata.encoder.Encoding
 import org.apache.carbondata.core.metadata.schema.partition.PartitionType
 import org.apache.carbondata.core.metadata.schema.table.{CarbonTable, TableInfo}
-import org.apache.carbondata.core.util.CarbonUtil
+import org.apache.carbondata.core.util.{CarbonUtil, ThreadLocalSessionInfo}
 import org.apache.carbondata.events.{CreateTablePostExecutionEvent, CreateTablePreExecutionEvent, OperationContext, OperationListenerBus}
 import org.apache.carbondata.spark.util.CarbonSparkUtil
 
@@ -48,28 +50,41 @@ case class CarbonCreateTableCommand(
     val LOGGER = LogServiceFactory.getLogService(this.getClass.getCanonicalName)
     val tableName = tableInfo.getFactTable.getTableName
     var databaseOpt : Option[String] = None
-    if(tableInfo.getDatabaseName != null) {
+    ThreadLocalSessionInfo
+      .setConfigurationToCurrentThread(sparkSession.sessionState.newHadoopConf())
+    if (tableInfo.getDatabaseName != null) {
       databaseOpt = Some(tableInfo.getDatabaseName)
     }
     val dbName = CarbonEnv.getDatabaseName(databaseOpt)(sparkSession)
+    setAuditTable(dbName, tableName)
+    setAuditInfo(tableInfo.getFactTable.getTableProperties.asScala.toMap
+                 ++ Map("external" -> isExternal.toString))
     // set dbName and tableUnique Name in the table info
     tableInfo.setDatabaseName(dbName)
     tableInfo.setTableUniqueName(CarbonTable.buildUniqueName(dbName, tableName))
-    LOGGER.audit(s"Creating Table with Database name [$dbName] and Table name [$tableName]")
-
+    val isTransactionalTable = tableInfo.isTransactionalTable
     if (sparkSession.sessionState.catalog.listTables(dbName)
       .exists(_.table.equalsIgnoreCase(tableName))) {
       if (!ifNotExistsSet) {
-        LOGGER.audit(
-          s"Table creation with Database name [$dbName] and Table name [$tableName] failed. " +
-          s"Table [$tableName] already exists under database [$dbName]")
         throw new TableAlreadyExistsException(dbName, tableName)
       }
     } else {
-      val tablePath = tableLocation.getOrElse(
+      val path = tableLocation.getOrElse(
         CarbonEnv.getTablePath(Some(dbName), tableName)(sparkSession))
+      val tablePath = if (FileFactory.getCarbonFile(path).exists() && !isExternal &&
+                          isTransactionalTable && tableLocation.isEmpty) {
+        path + "_" + tableInfo.getFactTable.getTableId
+      } else {
+        path
+      }
+      val streaming = tableInfo.getFactTable.getTableProperties.get("streaming")
+      if (path.startsWith("s3") && streaming != null && streaming != null &&
+          streaming.equalsIgnoreCase("true")) {
+        throw new UnsupportedOperationException("streaming is not supported with s3 store")
+      }
       tableInfo.setTablePath(tablePath)
-      val tableIdentifier = AbsoluteTableIdentifier.from(tablePath, dbName, tableName)
+      val tableIdentifier = AbsoluteTableIdentifier
+        .from(tablePath, dbName, tableName, tableInfo.getFactTable.getTableId)
 
       // Add validation for sort scope when create table
       val sortScope = tableInfo.getFactTable.getTableProperties.asScala
@@ -84,13 +99,24 @@ case class CarbonCreateTableCommand(
         throwMetadataException(dbName, tableName, "Table should have at least one column.")
       }
 
+      // Add validatation for column compressor when create table
+      val columnCompressor = tableInfo.getFactTable.getTableProperties.get(
+        CarbonCommonConstants.COMPRESSOR)
+      try {
+        if (null != columnCompressor) {
+          CompressorFactory.getInstance().getCompressor(columnCompressor)
+        }
+      } catch {
+        case ex : UnsupportedOperationException =>
+          throw new InvalidConfigurationException(ex.getMessage)
+      }
+
       val operationContext = new OperationContext
       val createTablePreExecutionEvent: CreateTablePreExecutionEvent =
         CreateTablePreExecutionEvent(sparkSession, tableIdentifier, Some(tableInfo))
       OperationListenerBus.getInstance.fireEvent(createTablePreExecutionEvent, operationContext)
       val catalog = CarbonEnv.getInstance(sparkSession).carbonMetastore
       val carbonSchemaString = catalog.generateTableSchemaString(tableInfo, tableIdentifier)
-      val isUnmanaged = tableInfo.isUnManagedTable
       if (createDSTable) {
         try {
           val tablePath = tableIdentifier.getTablePath
@@ -133,7 +159,7 @@ case class CarbonCreateTableCommand(
                  |  tablePath "$tablePath",
                  |  path "$tablePath",
                  |  isExternal "$isExternal",
-                 |  isUnManaged "$isUnmanaged",
+                 |  isTransactional "$isTransactionalTable",
                  |  isVisible "$isVisible"
                  |  $carbonSchemaString)
                  |  $partitionString
@@ -150,16 +176,15 @@ case class CarbonCreateTableCommand(
               case _: Exception => // No operation
             }
             val msg = s"Create table'$tableName' in database '$dbName' failed"
-            LOGGER.audit(msg.concat(", ").concat(e.getMessage))
-            LOGGER.error(e, msg)
             throwMetadataException(dbName, tableName, msg.concat(", ").concat(e.getMessage))
         }
       }
       val createTablePostExecutionEvent: CreateTablePostExecutionEvent =
         CreateTablePostExecutionEvent(sparkSession, tableIdentifier)
       OperationListenerBus.getInstance.fireEvent(createTablePostExecutionEvent, operationContext)
-      LOGGER.audit(s"Table created with Database name [$dbName] and Table name [$tableName]")
     }
     Seq.empty
   }
+
+  override protected def opName: String = "CREATE TABLE"
 }

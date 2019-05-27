@@ -85,6 +85,7 @@ public class DataBlockIterator extends CarbonIterator<List<Object[]>> {
   public DataBlockIterator(BlockExecutionInfo blockExecutionInfo, FileReader fileReader,
       int batchSize, QueryStatisticsModel queryStatisticsModel, ExecutorService executorService) {
     this.blockExecutionInfo = blockExecutionInfo;
+    this.blockExecutionInfo.setQueryStatisticsModel(queryStatisticsModel);
     this.fileReader = fileReader;
     blockletIterator = new BlockletIterator(blockExecutionInfo.getFirstDataBlock(),
         blockExecutionInfo.getNumberOfBlockToScan());
@@ -261,6 +262,7 @@ public class DataBlockIterator extends CarbonIterator<List<Object[]>> {
         if (blockletScannedResult != null) {
           blockletScannedResult.freeMemory();
         }
+        future = null;
       } catch (InterruptedException | ExecutionException e) {
         throw new RuntimeException(e);
       }

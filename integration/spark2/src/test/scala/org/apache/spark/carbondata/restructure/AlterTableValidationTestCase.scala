@@ -43,7 +43,10 @@ class AlterTableValidationTestCase extends Spark2QueryTest with BeforeAndAfterAl
     sql("drop table if exists testalterwithboolean")
     sql("drop table if exists testalterwithbooleanwithoutdefaultvalue")
     sql("drop table if exists test")
-
+    sql("drop table if exists retructure_iud")
+    sql("drop table if exists restructure_random_select")
+    sql("drop table if exists alterTable")
+    sql("drop table if exists alterPartitionTable")
 
     // clean data folder
     CarbonProperties.getInstance()
@@ -525,16 +528,14 @@ class AlterTableValidationTestCase extends Spark2QueryTest with BeforeAndAfterAl
         "tblproperties('DICTIONARY_INCLUDE'='empno','DICTIONARY_EXCLUDE'='role')")
     sql("alter table defaultSortColumnsWithAlter drop columns (designation)")
     sql("alter table defaultSortColumnsWithAlter add columns (designation12 String)")
-    checkExistence(sql("describe formatted defaultSortColumnsWithAlter"),true,"SORT_COLUMNS")
-    checkExistence(sql("describe formatted defaultSortColumnsWithAlter"),true,"empno,empname,role,doj")
+    checkExistence(sql("describe formatted defaultSortColumnsWithAlter"),true,"Sort Columns empno, empname, role, doj")
   }
   test("describe formatted for specified sort_columns pre and post alter") {
     sql("CREATE TABLE specifiedSortColumnsWithAlter (empno int, empname String, designation String,role String, doj Timestamp) STORED BY 'org.apache.carbondata.format' " +
         "tblproperties('sort_columns'='empno,empname,designation,role,doj','DICTIONARY_INCLUDE'='empno','DICTIONARY_EXCLUDE'='role')")
     sql("alter table specifiedSortColumnsWithAlter drop columns (designation)")
     sql("alter table specifiedSortColumnsWithAlter add columns (designation12 String)")
-    checkExistence(sql("describe formatted specifiedSortColumnsWithAlter"),true,"SORT_COLUMNS")
-    checkExistence(sql("describe formatted specifiedSortColumnsWithAlter"),true,"empno,empname,role,doj")
+    checkExistence(sql("describe formatted specifiedSortColumnsWithAlter"),true,"Sort Columns empno, empname, role, doj")
   }
 
   test("test to check if new parent table name is reflected in pre-aggregate tables") {
@@ -547,7 +548,7 @@ class AlterTableValidationTestCase extends Spark2QueryTest with BeforeAndAfterAl
       " a,sum(b) from PreAggMain group by a")
     assert(intercept[ProcessMetaDataException] {
       sql("alter table preAggmain_preagg1 rename to preagg2")
-    }.getMessage.contains("Rename operation for pre-aggregate table is not supported."))
+    }.getMessage.contains("Rename operation for datamaps is not supported."))
     assert(intercept[ProcessMetaDataException] {
       sql("alter table preaggmain rename to preaggmain_new")
     }.getMessage.contains("Rename operation is not supported for table with pre-aggregate tables"))
@@ -690,6 +691,88 @@ test("test alter command for boolean data type with correct default measure valu
     testFilterWithDefaultValue(true)
     testFilterWithDefaultValue(false)
   }
+  test("Filter query on Restructure and updated table") {
+    sql(
+      """
+         CREATE TABLE retructure_iud(id int, name string, city string, age int)
+         STORED BY 'org.apache.carbondata.format'
+      """)
+    val testData = s"$resourcesPath/sample.csv"
+    sql(s"LOAD DATA LOCAL INPATH '$testData' into table retructure_iud")
+    sql("ALTER TABLE retructure_iud ADD COLUMNS (newField STRING) " +
+        "TBLPROPERTIES ('DEFAULT.VALUE.newField'='def', 'DICTIONARY_INCLUDE'='newField')").show()
+    sql("ALTER TABLE retructure_iud ADD COLUMNS (newField1 STRING) " +
+        "TBLPROPERTIES ('DEFAULT.VALUE.newField1'='def', 'DICTIONARY_EXCLUDE'='newField1')").show()
+    // update operation
+    sql("""update retructure_iud d  set (d.id) = (d.id + 1) where d.id > 2""").show()
+    checkAnswer(
+      sql("select count(*) from retructure_iud where id = 2 and newfield1='def'"),
+      Seq(Row(1))
+    )
+  }
+
+  test("Alter table selection in random order"){
+    def test(): Unit ={
+      sql("drop table if exists restructure_random_select")
+      sql("create table restructure_random_select (imei string,channelsId string,gamePointId double,deviceInformationId double," +
+          " deliverycharge double) STORED BY 'org.apache.carbondata.format' TBLPROPERTIES('table_blocksize'='2000','sort_columns'='imei')")
+      sql("insert into restructure_random_select values('abc','def',50.5,30.2,40.6) ")
+      sql("Alter table restructure_random_select add columns (age int,name String)")
+      checkAnswer(
+        sql("select gamePointId,deviceInformationId,age,name from restructure_random_select where name is NULL or channelsId=4"),
+        Seq(Row(50.5,30.2,null,null)))
+      checkAnswer(
+        sql("select age,name,gamePointId,deviceInformationId from restructure_random_select where name is NULL or channelsId=4"),
+        Seq(Row(null,null,50.5,30.2)))
+    }
+    try {
+      test()
+      CarbonProperties.getInstance()
+        .addProperty(CarbonCommonConstants.ENABLE_VECTOR_READER, "false")
+      test()
+    }
+    finally {
+      CarbonProperties.getInstance()
+        .addProperty(CarbonCommonConstants.ENABLE_VECTOR_READER,
+          CarbonCommonConstants.ENABLE_VECTOR_READER_DEFAULT)
+    }
+  }
+
+  test("load table after alter drop column scenario") {
+    sql("drop table if exists alterTable")
+    sql(
+      "create table alterTable(empno string, salary string) stored by 'carbondata' tblproperties" +
+      "('sort_columns'='')")
+    sql("alter table alterTable drop columns(empno)")
+    sql("alter table alterTable add columns(empno string)")
+    sql(s"load data local inpath '$resourcesPath/double.csv' into table alterTable options" +
+        s"('header'='true')")
+    checkAnswer(sql("select salary from alterTable limit 1"), Row(" 775678765456789098765432.789"))
+  }
+
+  test("load partition table after alter drop column scenario") {
+    val timestampFormat = CarbonProperties.getInstance().getProperty(CarbonCommonConstants.CARBON_TIMESTAMP_FORMAT)
+    CarbonProperties.getInstance().addProperty(CarbonCommonConstants.CARBON_TIMESTAMP_FORMAT, "dd-MM-yyyy")
+    sql("drop table if exists alterPartitionTable")
+    sql(
+      """
+        | CREATE TABLE alterPartitionTable (empname String, designation String, doj Timestamp,
+        |  workgroupcategory int, workgroupcategoryname String, deptno int, deptname String,
+        |  projectcode int, projectjoindate Timestamp, projectenddate Timestamp,attendance int,
+        |  utilization int,salary int)
+        | PARTITIONED BY (empno int)
+        | STORED BY 'org.apache.carbondata.format'
+        | TBLPROPERTIES('SORT_COLUMNS'='empname,deptno,projectcode,projectjoindate,
+        | projectenddate,attendance')
+      """.stripMargin)
+    sql("alter table alterPartitionTable drop columns(projectenddate)")
+    sql("alter table alterPartitionTable add columns(projectenddate timestamp)")
+    sql(s"LOAD DATA local inpath '$resourcesPath/data.csv' INTO TABLE alterPartitionTable OPTIONS('DELIMITER'= ',', " +
+              "'QUOTECHAR'= '\"')")
+    sql("select * from alterPartitionTable where empname='bill'").show(false)
+    CarbonProperties.getInstance()
+      .addProperty(CarbonCommonConstants.CARBON_TIMESTAMP_FORMAT, timestampFormat)
+  }
 
   override def afterAll {
     sql("DROP TABLE IF EXISTS restructure")
@@ -707,5 +790,9 @@ test("test alter command for boolean data type with correct default measure valu
     sql("drop table if exists testalterwithboolean")
     sql("drop table if exists testalterwithbooleanwithoutdefaultvalue")
     sql("drop table if exists test")
+    sql("drop table if exists retructure_iud")
+    sql("drop table if exists restructure_random_select")
+    sql("drop table if exists alterTable")
+    sql("drop table if exists alterPartitionTable")
   }
 }

@@ -20,6 +20,7 @@ package org.apache.spark.sql.optimizer
 import java.util
 
 import scala.collection.JavaConverters._
+import scala.util.Try
 
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.expressions._
@@ -28,8 +29,10 @@ import org.apache.spark.sql.types._
 import org.apache.spark.sql.CarbonContainsWith
 import org.apache.spark.sql.CarbonEndsWith
 import org.apache.spark.sql.CarbonExpressions.{MatchCast => Cast}
+import org.apache.spark.sql.carbondata.execution.datasources.CarbonSparkDataSourceUtil
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.hive.CarbonSessionCatalog
+import org.apache.spark.util.{CarbonReflectionUtils, SparkUtil}
 
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.datamap.Segment
@@ -43,9 +46,9 @@ import org.apache.carbondata.core.scan.expression.logical.{AndExpression, FalseE
 import org.apache.carbondata.core.scan.filter.intf.ExpressionType
 import org.apache.carbondata.core.util.CarbonProperties
 import org.apache.carbondata.core.util.ThreadLocalSessionInfo
-import org.apache.carbondata.datamap.TextMatch
+import org.apache.carbondata.datamap.{TextMatch, TextMatchLimit}
 import org.apache.carbondata.spark.CarbonAliasDecoderRelation
-import org.apache.carbondata.spark.util.CarbonScalaUtil
+
 
 
 /**
@@ -127,13 +130,15 @@ object CarbonFilters {
           Some(new SparkUnknownExpression(expr.transform {
             case AttributeReference(name, dataType, _, _) =>
               CarbonBoundReference(new CarbonColumnExpression(name.toString,
-                CarbonScalaUtil.convertSparkToCarbonDataType(dataType)), dataType, expr.nullable)
+                CarbonSparkDataSourceUtil.convertSparkToCarbonDataType(dataType)),
+                dataType, expr.nullable)
           }, ExpressionType.ENDSWITH))
         case CarbonContainsWith(expr: Expression) =>
           Some(new SparkUnknownExpression(expr.transform {
             case AttributeReference(name, dataType, _, _) =>
               CarbonBoundReference(new CarbonColumnExpression(name.toString,
-                CarbonScalaUtil.convertSparkToCarbonDataType(dataType)), dataType, expr.nullable)
+                CarbonSparkDataSourceUtil.convertSparkToCarbonDataType(dataType)),
+                dataType, expr.nullable)
           }, ExpressionType.CONTAINSWITH))
         case CastExpr(expr: Expression) =>
           Some(transformExpression(expr))
@@ -141,17 +146,20 @@ object CarbonFilters {
           Some(new FalseExpression(null))
         case TextMatch(queryString) =>
           Some(new MatchExpression(queryString))
+        case TextMatchLimit(queryString, maxDoc) =>
+          Some(new MatchExpression(queryString, Try(maxDoc.toInt).getOrElse(Integer.MAX_VALUE)))
         case _ => None
       }
     }
 
     def getCarbonExpression(name: String) = {
       new CarbonColumnExpression(name,
-        CarbonScalaUtil.convertSparkToCarbonDataType(dataTypeOf(name)))
+        CarbonSparkDataSourceUtil.convertSparkToCarbonDataType(dataTypeOf(name)))
     }
 
     def getCarbonLiteralExpression(name: String, value: Any): CarbonExpression = {
-      val dataTypeOfAttribute = CarbonScalaUtil.convertSparkToCarbonDataType(dataTypeOf(name))
+      val dataTypeOfAttribute =
+        CarbonSparkDataSourceUtil.convertSparkToCarbonDataType(dataTypeOf(name))
       val dataType = if (Option(value).isDefined
                          && dataTypeOfAttribute == CarbonDataTypes.STRING
                          && value.isInstanceOf[Double]) {
@@ -291,6 +299,27 @@ object CarbonFilters {
     filters.flatMap(translate(_, false)).toArray
   }
 
+  /**
+   * This API checks whether StringTrim object is compatible with
+   * carbon,carbon only deals with the space any other symbol should
+   * be ignored.So condition is SPARK version < 2.3.
+   * If it is 2.3 then trimStr field should be empty
+   *
+   * @param stringTrim
+   * @return
+   */
+  def isStringTrimCompatibleWithCarbon(stringTrim: StringTrim): Boolean = {
+    var isCompatible = true
+    if (SparkUtil.isSparkVersionXandAbove("2.3")) {
+      val trimStr = CarbonReflectionUtils.getField("trimStr", stringTrim)
+        .asInstanceOf[Option[Expression]]
+      if (trimStr.isDefined) {
+        isCompatible = false
+      }
+    }
+    isCompatible
+  }
+
   def transformExpression(expr: Expression): CarbonExpression = {
     expr match {
       case Or(left, right)
@@ -361,9 +390,10 @@ object CarbonFilters {
         new LessThanEqualToExpression(transformExpression(left), transformExpression(right))
       case AttributeReference(name, dataType, _, _) =>
         new CarbonColumnExpression(name.toString,
-          CarbonScalaUtil.convertSparkToCarbonDataType(dataType))
+          CarbonSparkDataSourceUtil.convertSparkToCarbonDataType(dataType))
       case Literal(name, dataType) => new
-          CarbonLiteralExpression(name, CarbonScalaUtil.convertSparkToCarbonDataType(dataType))
+          CarbonLiteralExpression(name,
+            CarbonSparkDataSourceUtil.convertSparkToCarbonDataType(dataType))
       case StartsWith(left, right@Literal(pattern, dataType)) if pattern.toString.size > 0 &&
                                                                  isCarbonSupportedDataTypes(left) &&
                                                                  isCarbonSupportedDataTypes
@@ -376,14 +406,18 @@ object CarbonFilters {
         val r = new LessThanExpression(
           transformExpression(left),
           new CarbonLiteralExpression(maxValueLimit,
-            CarbonScalaUtil.convertSparkToCarbonDataType(dataType)))
+            CarbonSparkDataSourceUtil.convertSparkToCarbonDataType(dataType)))
         new AndExpression(l, r)
-      case StringTrim(child) => transformExpression(child)
+      case strTrim: StringTrim if isStringTrimCompatibleWithCarbon(strTrim) =>
+        transformExpression(strTrim)
+      case s: ScalaUDF =>
+        new MatchExpression(s.children.head.toString())
       case _ =>
         new SparkUnknownExpression(expr.transform {
           case AttributeReference(name, dataType, _, _) =>
             CarbonBoundReference(new CarbonColumnExpression(name.toString,
-              CarbonScalaUtil.convertSparkToCarbonDataType(dataType)), dataType, expr.nullable)
+              CarbonSparkDataSourceUtil.convertSparkToCarbonDataType(dataType)),
+              dataType, expr.nullable)
         }
         )
     }
@@ -412,6 +446,7 @@ object CarbonFilters {
       case TimestampType => true
       case ArrayType(_, _) => true
       case StructType(_) => true
+      case MapType(_, _, _) => true
       case DecimalType() => true
       case _ => false
     }
@@ -421,9 +456,7 @@ object CarbonFilters {
   // not able find the classes inside scala list and gives ClassNotFoundException.
   private def convertToJavaList(
       scalaList: Seq[CarbonExpression]): java.util.List[CarbonExpression] = {
-    val javaList = new java.util.ArrayList[CarbonExpression]()
-    scalaList.foreach(javaList.add)
-    javaList
+    CarbonSparkDataSourceUtil.convertToJavaList(scalaList)
   }
 
   def preProcessExpressions(expressions: Seq[Expression]): Seq[Expression] = {
@@ -528,7 +561,7 @@ object CarbonFilters {
         // In case of compaction multiple segments will be passed as CARBON_INPUT_SEGMENTS.
         // Therefore partitionSpec will be extracted from all segments.
         val segments = segmentNumbersFromProperty.split(",").flatMap { a =>
-          val segment = Segment.toSegment(a)
+          val segment = Segment.toSegment(a, null)
           val segmentFile = new SegmentFileStore(table.getTablePath, segment.getSegmentFileName)
           segmentFile.getPartitionSpecs.asScala
         }

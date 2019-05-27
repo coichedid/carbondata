@@ -16,7 +16,9 @@
  */
 package org.apache.carbondata.spark.dictionary.server;
 
-import org.apache.carbondata.common.logging.LogService;
+import java.io.IOException;
+import java.security.PrivilegedExceptionAction;
+
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.dictionary.generator.key.DictionaryMessage;
@@ -29,12 +31,13 @@ import org.apache.carbondata.core.util.CarbonProperties;
 import com.google.common.collect.Lists;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.log4j.Logger;
 import org.apache.spark.SecurityManager;
 import org.apache.spark.SparkConf;
 import org.apache.spark.network.TransportContext;
 import org.apache.spark.network.netty.SparkTransportConf;
 import org.apache.spark.network.sasl.SaslServerBootstrap;
-import org.apache.spark.network.server.TransportServer;
 import org.apache.spark.network.server.TransportServerBootstrap;
 import org.apache.spark.network.util.TransportConf;
 import scala.Some;
@@ -44,7 +47,7 @@ import scala.Some;
  */
 public class SecureDictionaryServer extends AbstractDictionaryServer implements DictionaryServer  {
 
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(SecureDictionaryServer.class.getName());
 
   private SecureDictionaryServerHandler secureDictionaryServerHandler;
@@ -63,7 +66,16 @@ public class SecureDictionaryServer extends AbstractDictionaryServer implements 
     this.conf = conf;
     this.host = host;
     this.port = port;
-    startServer();
+    try {
+      UserGroupInformation.getLoginUser().doAs(new PrivilegedExceptionAction<Void>() {
+        @Override public Void run() throws Exception {
+          startServer();
+          return null;
+        }
+      });
+    } catch (IOException | InterruptedException io) {
+      LOGGER.error("Failed to start Dictionary Server in secure mode", io);
+    }
   }
 
   public static synchronized DictionaryServer getInstance(SparkConf conf, String host, int port,
@@ -129,15 +141,17 @@ public class SecureDictionaryServer extends AbstractDictionaryServer implements 
         TransportServerBootstrap bootstrap =
             new SaslServerBootstrap(transportConf, securityManager);
         String host = findLocalIpAddress(LOGGER);
-        TransportServer transportServer = context
-            .createServer(host, port, Lists.<TransportServerBootstrap>newArrayList(bootstrap));
-        LOGGER.audit("Dictionary Server started, Time spent " + (System.currentTimeMillis() - start)
+        //iteratively listening to newports
+        context
+            .createServer(host, newPort, Lists.<TransportServerBootstrap>newArrayList(bootstrap));
+        LOGGER.info(
+            "Dictionary Server started, Time spent " + (System.currentTimeMillis() - start)
             + " Listening on port " + newPort);
         this.port = newPort;
         this.host = host;
         break;
       } catch (Exception e) {
-        LOGGER.error(e, "Dictionary Server Failed to bind to port:");
+        LOGGER.error("Dictionary Server Failed to bind to port: " + newPort, e);
         if (i == 9) {
           throw new RuntimeException("Dictionary Server Could not bind to any port");
         }
@@ -186,11 +200,20 @@ public class SecureDictionaryServer extends AbstractDictionaryServer implements 
   @Override
   public void shutdown() throws Exception {
     LOGGER.info("Shutting down dictionary server");
-    worker.shutdownGracefully();
-    boss.shutdownGracefully();
+    try {
+      UserGroupInformation.getLoginUser().doAs(new PrivilegedExceptionAction<Void>() {
+        @Override public Void run() throws Exception {
+          worker.shutdownGracefully();
+          boss.shutdownGracefully();
+          return null;
+        }
+      });
+    } catch (IOException | InterruptedException e) {
+      LOGGER.error("Failed to stop Dictionary Server in secure mode", e);
+    }
   }
 
-  public void initializeDictionaryGenerator(CarbonTable carbonTable) throws Exception {
+  public void initializeDictionaryGenerator(CarbonTable carbonTable) {
     secureDictionaryServerHandler.initializeTable(carbonTable);
   }
 

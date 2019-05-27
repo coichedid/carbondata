@@ -30,11 +30,16 @@ import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.execution.LeafExecNode
 import org.apache.spark.sql.optimizer.CarbonFilters
+import org.apache.spark.sql.types.StringType
+import org.apache.spark.unsafe.types.UTF8String
 
+import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable
 import org.apache.carbondata.core.mutate.CarbonUpdateUtil
+import org.apache.carbondata.core.util.ThreadLocalSessionInfo
 import org.apache.carbondata.hadoop.api.{CarbonInputFormat, CarbonTableInputFormat}
+import org.apache.carbondata.hadoop.util.CarbonInputFormatUtil
 
 case class CarbonCountStar(
     attributesRaw: Seq[Attribute],
@@ -43,6 +48,8 @@ case class CarbonCountStar(
     outUnsafeRows: Boolean = true) extends LeafExecNode {
 
   override def doExecute(): RDD[InternalRow] = {
+    ThreadLocalSessionInfo
+      .setConfigurationToCurrentThread(sparkSession.sessionState.newHadoopConf())
     val absoluteTableIdentifier = carbonTable.getAbsoluteTableIdentifier
     val (job, tableInputFormat) = createCarbonInputFormat(absoluteTableIdentifier)
     CarbonInputFormat.setQuerySegment(job.getConfiguration, absoluteTableIdentifier)
@@ -59,7 +66,13 @@ case class CarbonCountStar(
             carbonTable.getTableName,
             Some(carbonTable.getDatabaseName))).map(_.asJava).orNull),
       carbonTable)
-    val value = new GenericInternalRow(Seq(Long.box(rowCount)).toArray.asInstanceOf[Array[Any]])
+    val valueRaw =
+      attributesRaw.head.dataType match {
+        case StringType => Seq(UTF8String.fromString(Long.box(rowCount).toString)).toArray
+          .asInstanceOf[Array[Any]]
+        case _ => Seq(Long.box(rowCount)).toArray.asInstanceOf[Array[Any]]
+      }
+    val value = new GenericInternalRow(valueRaw)
     val unsafeProjection = UnsafeProjection.create(output.map(_.dataType).toArray)
     val row = if (outUnsafeRows) unsafeProjection(value) else value
     sparkContext.parallelize(Seq(row))
@@ -72,12 +85,15 @@ case class CarbonCountStar(
   private def createCarbonInputFormat(absoluteTableIdentifier: AbsoluteTableIdentifier
   ): (Job, CarbonTableInputFormat[Array[Object]]) = {
     val carbonInputFormat = new CarbonTableInputFormat[Array[Object]]()
-    val jobConf: JobConf = new JobConf(new Configuration)
+    val jobConf: JobConf = new JobConf(FileFactory.getConfiguration)
     SparkHadoopUtil.get.addCredentials(jobConf)
+    CarbonInputFormat.setTableInfo(jobConf, carbonTable.getTableInfo)
     val job = new Job(jobConf)
     FileInputFormat.addInputPath(job, new Path(absoluteTableIdentifier.getTablePath))
     CarbonInputFormat
-      .setUnmanagedTable(job.getConfiguration, carbonTable.getTableInfo.isUnManagedTable)
+      .setTransactionalTable(job.getConfiguration,
+        carbonTable.getTableInfo.isTransactionalTable)
+    CarbonInputFormatUtil.setDataMapJobIfConfigured(job.getConfiguration)
     (job, carbonInputFormat)
   }
 }

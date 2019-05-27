@@ -23,42 +23,62 @@ package org.apache.carbondata.spark
  */
 class CarbonOption(options: Map[String, String]) {
 
-  def dbName: Option[String] = options.get("dbName")
+  lazy val dbName: Option[String] = options.get("dbName")
 
-  def tableName: String = options.getOrElse("tableName", "default_table")
+  lazy val tableName: String = options.getOrElse("tableName", "default_table")
 
-  def tablePath: Option[String] = options.get("tablePath")
+  lazy val tablePath: Option[String] = options.get("tablePath")
 
-  def partitionCount: String = options.getOrElse("partitionCount", "1")
+  lazy val partitionCount: String = options.getOrElse("partitionCount", "1")
 
-  def partitionClass: String = {
+  lazy val partitionClass: String = {
     options.getOrElse("partitionClass",
       "org.apache.carbondata.processing.partition.impl.SampleDataPartitionerImpl")
   }
 
-  def tempCSV: Boolean = options.getOrElse("tempCSV", "false").toBoolean
+  lazy val compress: Boolean = options.getOrElse("compress", "false").toBoolean
 
-  def compress: Boolean = options.getOrElse("compress", "false").toBoolean
+  lazy val partitionColumns: Option[Seq[String]] = {
+    if (options.contains("partitionColumns")) {
+      Option(options("partitionColumns").split(",").map(_.trim))
+    } else {
+      None
+    }
+  }
 
-  def singlePass: Boolean = options.getOrElse("single_pass", "false").toBoolean
+  lazy val singlePass: Boolean = options.getOrElse("single_pass", "false").toBoolean
 
-  def sortColumns: Option[String] = options.get("sort_columns")
+  lazy val sortColumns: Option[String] = options.get("sort_columns")
 
-  def dictionaryInclude: Option[String] = options.get("dictionary_include")
+  lazy val sortScope: Option[String] = options.get("sort_scope")
 
-  def dictionaryExclude: Option[String] = options.get("dictionary_exclude")
+  lazy val dictionaryInclude: Option[String] = options.get("dictionary_include")
 
-  def tableBlockSize: Option[String] = options.get("table_blocksize")
+  lazy val dictionaryExclude: Option[String] = options.get("dictionary_exclude")
 
-  def bucketNumber: Int = options.getOrElse("bucketnumber", "0").toInt
+  lazy val longStringColumns: Option[String] = options.get("long_string_columns")
 
-  def bucketColumns: String = options.getOrElse("bucketcolumns", "")
+  lazy val tableBlockSize: Option[String] = options.get("table_blocksize")
 
-  def isBucketingEnabled: Boolean = options.contains("bucketcolumns") &&
+  lazy val tableBlockletSize: Option[String] = options.get("table_blocklet_size")
+
+  lazy val bucketNumber: Int = options.getOrElse("bucketnumber", "0").toInt
+
+  lazy val bucketColumns: String = options.getOrElse("bucketcolumns", "")
+
+  lazy val isBucketingEnabled: Boolean = options.contains("bucketcolumns") &&
                                     options.contains("bucketnumber")
 
-  def isStreaming: Boolean =
-    options.getOrElse("streaming", "false").toBoolean
+  lazy val isStreaming: Boolean = {
+    var stream = options.getOrElse("streaming", "false")
+    if (stream.equalsIgnoreCase("sink") || stream.equalsIgnoreCase("source")) {
+      stream = "true"
+    }
+    stream.toBoolean
+  }
+
+  lazy val overwriteEnabled: Boolean =
+    options.getOrElse("overwrite", "false").toBoolean
 
   def toMap: Map[String, String] = options
 }

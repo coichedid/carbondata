@@ -159,78 +159,6 @@ object GlobalDictionaryUtil {
     dimensionsWithDict.toArray
   }
 
-  /**
-   * invoke CarbonDictionaryWriter to write dictionary to file.
-   *
-   * @param model       instance of DictionaryLoadModel
-   * @param columnIndex the index of current column in column list
-   * @param iter        distinct value list of dictionary
-   */
-  def writeGlobalDictionaryToFile(model: DictionaryLoadModel,
-      columnIndex: Int,
-      iter: Iterator[String]): Unit = {
-    val dictService = CarbonCommonFactory.getDictionaryService
-    val dictionaryColumnUniqueIdentifier: DictionaryColumnUniqueIdentifier = new
-        DictionaryColumnUniqueIdentifier(
-      model.table,
-      model.columnIdentifier(columnIndex),
-      model.columnIdentifier(columnIndex).getDataType)
-    val writer: CarbonDictionaryWriter = dictService
-      .getDictionaryWriter(dictionaryColumnUniqueIdentifier)
-    try {
-      while (iter.hasNext) {
-        writer.write(iter.next)
-      }
-    } finally {
-      writer.close()
-    }
-  }
-
-  /**
-   * read global dictionary from cache
-   */
-  def readGlobalDictionaryFromCache(model: DictionaryLoadModel): HashMap[String, Dictionary] = {
-    val dictMap = new HashMap[String, Dictionary]
-    model.primDimensions.zipWithIndex.filter(f => model.dictFileExists(f._2)).foreach { m =>
-      val dict = CarbonLoaderUtil.getDictionary(model.table,
-        m._1.getColumnIdentifier, m._1.getDataType
-      )
-      dictMap.put(m._1.getColumnId, dict)
-    }
-    dictMap
-  }
-
-  /**
-   * invoke CarbonDictionaryReader to read dictionary from files.
-   *
-   * @param model carbon dictionary load model
-   */
-  def readGlobalDictionaryFromFile(model: DictionaryLoadModel): HashMap[String, HashSet[String]] = {
-    val dictMap = new HashMap[String, HashSet[String]]
-    val dictService = CarbonCommonFactory.getDictionaryService
-    for (i <- model.primDimensions.indices) {
-      val dictionaryColumnUniqueIdentifier: DictionaryColumnUniqueIdentifier = new
-          DictionaryColumnUniqueIdentifier(
-            model.table,
-            model.columnIdentifier(i),
-            model.columnIdentifier(i).getDataType)
-      val set = new HashSet[String]
-      if (model.dictFileExists(i)) {
-        val reader: CarbonDictionaryReader = dictService.getDictionaryReader(
-          dictionaryColumnUniqueIdentifier)
-        val values = reader.read
-        if (values != null) {
-          for (j <- 0 until values.size) {
-            set.add(new String(values.get(j),
-              Charset.forName(CarbonCommonConstants.DEFAULT_CHARSET)))
-          }
-        }
-      }
-      dictMap.put(model.primDimensions(i).getColumnId, set)
-    }
-    dictMap
-  }
-
   def generateParserForChildrenDimension(dim: CarbonDimension,
       format: DataFormat,
       mapColumnValuesWithId:
@@ -533,9 +461,11 @@ object GlobalDictionaryUtil {
       dictFolderPath, forPreDefDict = true)
     // new RDD to achieve distributed column dict generation
     val extInputRDD = new CarbonColumnDictGenerateRDD(carbonLoadModel, dictLoadModel,
-      sqlContext.sparkContext, table, dimensions, dictFolderPath)
+      sqlContext.sparkSession, table, dimensions, dictFolderPath)
       .partitionBy(new ColumnPartitioner(dictLoadModel.primDimensions.length))
-    val statusList = new CarbonGlobalDictionaryGenerateRDD(extInputRDD, dictLoadModel).collect()
+    val statusList = new CarbonGlobalDictionaryGenerateRDD(sqlContext.sparkSession, extInputRDD,
+      dictLoadModel)
+      .collect()
     // check result status
     checkStatus(carbonLoadModel, sqlContext, dictLoadModel, statusList)
   }
@@ -742,10 +672,13 @@ object GlobalDictionaryUtil {
           val model = createDictionaryLoadModel(carbonLoadModel, carbonTableIdentifier,
             requireDimension, dictfolderPath, false)
           // combine distinct value in a block and partition by column
-          val inputRDD = new CarbonBlockDistinctValuesCombineRDD(dictRdd, model)
+          val inputRDD = new CarbonBlockDistinctValuesCombineRDD(sqlContext.sparkSession, dictRdd,
+            model)
             .partitionBy(new ColumnPartitioner(model.primDimensions.length))
           // generate global dictionary files
-          val statusList = new CarbonGlobalDictionaryGenerateRDD(inputRDD, model).collect()
+          val statusList = new CarbonGlobalDictionaryGenerateRDD(sqlContext.sparkSession,
+            inputRDD, model)
+            .collect()
           // check result status
           checkStatus(carbonLoadModel, sqlContext, model, statusList)
         } else {
@@ -763,17 +696,17 @@ object GlobalDictionaryUtil {
     } catch {
       case ex: Exception =>
         if (ex.getCause != null && ex.getCause.isInstanceOf[NoRetryException]) {
-          LOGGER.error(ex.getCause, "generate global dictionary failed")
+          LOGGER.error("generate global dictionary failed", ex.getCause)
           throw new Exception("generate global dictionary failed, " +
                               ex.getCause.getMessage)
         }
         ex match {
           case spx: SparkException =>
-            LOGGER.error(spx, "generate global dictionary failed")
+            LOGGER.error("generate global dictionary failed", spx)
             throw new Exception("generate global dictionary failed, " +
                                 trimErrorMessage(spx.getMessage))
           case _ =>
-            LOGGER.error(ex, "generate global dictionary failed")
+            LOGGER.error("generate global dictionary failed", ex)
             throw ex
         }
     }
@@ -803,10 +736,13 @@ object GlobalDictionaryUtil {
         val allDictionaryRdd = readAllDictionaryFiles(sqlContext, headers,
           requireColumnNames, allDictionaryPathAppended, accumulator)
         // read exist dictionary and combine
-        val inputRDD = new CarbonAllDictionaryCombineRDD(allDictionaryRdd, model)
+        val inputRDD = new CarbonAllDictionaryCombineRDD(sqlContext.sparkSession,
+          allDictionaryRdd, model)
           .partitionBy(new ColumnPartitioner(model.primDimensions.length))
         // generate global dictionary files
-        val statusList = new CarbonGlobalDictionaryGenerateRDD(inputRDD, model).collect()
+        val statusList = new CarbonGlobalDictionaryGenerateRDD(sqlContext.sparkSession, inputRDD,
+          model)
+          .collect()
         // check result status
         checkStatus(carbonLoadModel, sqlContext, model, statusList)
         // if the dictionary contains wrong format record, throw ex
@@ -824,9 +760,11 @@ object GlobalDictionaryUtil {
   def trimErrorMessage(input: String): String = {
     var errorMessage: String = null
     if (input != null && input.contains("TextParsingException:")) {
-      if (input.split("Hint").length > 0 &&
+      if (input.split("Hint").length > 1 &&
           input.split("Hint")(0).split("TextParsingException: ").length > 1) {
         errorMessage = input.split("Hint")(0).split("TextParsingException: ")(1)
+      } else if (input.split("Parser Configuration:").length > 1) {
+        errorMessage = input.split("Parser Configuration:")(0)
       }
     } else if (input != null && input.contains("Exception:")) {
       errorMessage = input.split("Exception: ")(1).split("\n")(0)

@@ -27,7 +27,6 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.datastore.impl.FileFactory;
@@ -41,6 +40,7 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
@@ -50,12 +50,13 @@ import org.apache.hadoop.io.compress.CompressionCodecFactory;
 import org.apache.hadoop.io.compress.GzipCodec;
 import org.apache.hadoop.io.compress.Lz4Codec;
 import org.apache.hadoop.io.compress.SnappyCodec;
+import org.apache.log4j.Logger;
 
 public abstract class AbstractDFSCarbonFile implements CarbonFile {
   /**
    * LOGGER
    */
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(AbstractDFSCarbonFile.class.getName());
   protected FileStatus fileStatus;
   public FileSystem fs;
@@ -145,12 +146,12 @@ public abstract class AbstractDFSCarbonFile implements CarbonFile {
     return fileStatus.getLen();
   }
 
-  public boolean renameTo(String changetoName) {
+  public boolean renameTo(String changeToName) {
     FileSystem fs;
     try {
       if (null != fileStatus) {
         fs = fileStatus.getPath().getFileSystem(hadoopConf);
-        return fs.rename(fileStatus.getPath(), new Path(changetoName));
+        return fs.rename(fileStatus.getPath(), new Path(changeToName));
       }
     } catch (IOException e) {
       LOGGER.error("Exception occurred:" + e.getMessage());
@@ -268,17 +269,7 @@ public abstract class AbstractDFSCarbonFile implements CarbonFile {
       // append to a file only if file already exists else file not found
       // exception will be thrown by hdfs
       if (CarbonUtil.isFileExists(path)) {
-        if (FileFactory.FileType.S3 == fileType) {
-          DataInputStream dataInputStream = fileSystem.open(pt);
-          int count = dataInputStream.available();
-          // create buffer
-          byte[] byteStreamBuffer = new byte[count];
-          dataInputStream.read(byteStreamBuffer);
-          stream = fileSystem.create(pt, true, bufferSize);
-          stream.write(byteStreamBuffer);
-        } else {
-          stream = fileSystem.append(pt, bufferSize);
-        }
+        stream = fileSystem.append(pt, bufferSize);
       } else {
         stream = fileSystem.create(pt, true, bufferSize);
       }
@@ -291,7 +282,12 @@ public abstract class AbstractDFSCarbonFile implements CarbonFile {
   @Override public DataInputStream getDataInputStream(String path, FileFactory.FileType fileType,
       int bufferSize, Configuration hadoopConf) throws IOException {
     return getDataInputStream(path, fileType, bufferSize,
-        CarbonUtil.inferCompressorFromFileName(path));
+        CarbonUtil.inferCompressorFromFileName(path), hadoopConf);
+  }
+
+  @Override public DataInputStream getDataInputStream(String path, FileFactory.FileType fileType,
+      int bufferSize, String compressor) throws IOException {
+    return getDataInputStream(path, fileType, bufferSize, FileFactory.getConfiguration());
   }
 
   /**
@@ -314,12 +310,12 @@ public abstract class AbstractDFSCarbonFile implements CarbonFile {
     return new DataInputStream(new BufferedInputStream(stream));
   }
 
-  @Override public DataInputStream getDataInputStream(String path, FileFactory.FileType fileType,
-      int bufferSize, String compressor) throws IOException {
+  private DataInputStream getDataInputStream(String path, FileFactory.FileType fileType,
+      int bufferSize, String compressor, Configuration configuration) throws IOException {
     path = path.replace("\\", "/");
     Path pt = new Path(path);
     InputStream inputStream;
-    FileSystem fs = pt.getFileSystem(FileFactory.getConfiguration());
+    FileSystem fs = pt.getFileSystem(configuration);
     if (bufferSize <= 0) {
       inputStream = fs.open(pt);
     } else {
@@ -331,8 +327,11 @@ public abstract class AbstractDFSCarbonFile implements CarbonFile {
       CompressionCodec codec = new CompressionCodecFactory(hadoopConf).getCodecByName(codecName);
       inputStream = codec.createInputStream(inputStream);
     }
-
-    return new DataInputStream(new BufferedInputStream(inputStream));
+    if (bufferSize <= 0 && inputStream instanceof FSDataInputStream) {
+      return (DataInputStream) inputStream;
+    } else {
+      return new DataInputStream(new BufferedInputStream(inputStream));
+    }
   }
 
   /**
@@ -460,7 +459,7 @@ public abstract class AbstractDFSCarbonFile implements CarbonFile {
     return fs.delete(path, true);
   }
 
-  @Override public boolean mkdirs(String filePath, FileFactory.FileType fileType)
+  @Override public boolean mkdirs(String filePath)
       throws IOException {
     filePath = filePath.replace("\\", "/");
     Path path = new Path(filePath);
@@ -502,7 +501,7 @@ public abstract class AbstractDFSCarbonFile implements CarbonFile {
     try {
       if (null != fileStatus && fileStatus.isDirectory()) {
         Path path = fileStatus.getPath();
-        listStatus = path.getFileSystem(FileFactory.getConfiguration()).listStatus(path);
+        listStatus = path.getFileSystem(hadoopConf).listStatus(path);
       } else {
         return new CarbonFile[0];
       }
@@ -518,22 +517,45 @@ public abstract class AbstractDFSCarbonFile implements CarbonFile {
     RemoteIterator<LocatedFileStatus> listStatus = null;
     if (null != fileStatus && fileStatus.isDirectory()) {
       Path path = fileStatus.getPath();
-      listStatus = path.getFileSystem(FileFactory.getConfiguration()).listFiles(path, recursive);
+      listStatus = fs.listFiles(path, recursive);
     } else {
       return new ArrayList<CarbonFile>();
     }
     return getFiles(listStatus);
   }
 
+  /**
+   * Method used to list files recursively and apply file filter on the result.
+   *
+   */
   @Override
-  public CarbonFile[] locationAwareListFiles() throws IOException {
+  public List<CarbonFile> listFiles(boolean recursive, CarbonFileFilter fileFilter)
+      throws IOException {
+    List<CarbonFile> carbonFiles = new ArrayList<>();
+    if (null != fileStatus && fileStatus.isDirectory()) {
+      RemoteIterator<LocatedFileStatus> listStatus = fs.listFiles(fileStatus.getPath(), recursive);
+      while (listStatus.hasNext()) {
+        LocatedFileStatus locatedFileStatus = listStatus.next();
+        CarbonFile carbonFile = FileFactory.getCarbonFile(locatedFileStatus.getPath().toString());
+        if (fileFilter.accept(carbonFile)) {
+          carbonFiles.add(carbonFile);
+        }
+      }
+    }
+    return carbonFiles;
+  }
+
+  @Override
+  public CarbonFile[] locationAwareListFiles(PathFilter pathFilter) throws IOException {
     if (null != fileStatus && fileStatus.isDirectory()) {
       List<FileStatus> listStatus = new ArrayList<>();
       Path path = fileStatus.getPath();
-      RemoteIterator<LocatedFileStatus> iter =
-          path.getFileSystem(FileFactory.getConfiguration()).listLocatedStatus(path);
+      RemoteIterator<LocatedFileStatus> iter = fs.listLocatedStatus(path);
       while (iter.hasNext()) {
-        listStatus.add(iter.next());
+        LocatedFileStatus fileStatus = iter.next();
+        if (pathFilter.accept(fileStatus.getPath()) && fileStatus.getLen() > 0) {
+          listStatus.add(fileStatus);
+        }
       }
       return getFiles(listStatus.toArray(new FileStatus[listStatus.size()]));
     }
@@ -545,8 +567,15 @@ public abstract class AbstractDFSCarbonFile implements CarbonFile {
    */
   protected abstract CarbonFile[] getFiles(FileStatus[] listStatus);
 
-  protected abstract List<CarbonFile> getFiles(RemoteIterator<LocatedFileStatus> listStatus)
-      throws IOException;
+  protected List<CarbonFile> getFiles(RemoteIterator<LocatedFileStatus> listStatus)
+      throws IOException {
+    List<CarbonFile> carbonFiles = new ArrayList<>();
+    while (listStatus.hasNext()) {
+      Path filePath = listStatus.next().getPath();
+      carbonFiles.add(FileFactory.getCarbonFile(filePath.toString()));
+    }
+    return carbonFiles;
+  }
 
   @Override
   public String[] getLocations() throws IOException {
@@ -575,5 +604,10 @@ public abstract class AbstractDFSCarbonFile implements CarbonFile {
     Path path = new Path(filePath);
     FileSystem fs = path.getFileSystem(FileFactory.getConfiguration());
     return fs.getDefaultReplication(path);
+  }
+
+  @Override
+  public long getLength() {
+    return fileStatus.getLen();
   }
 }

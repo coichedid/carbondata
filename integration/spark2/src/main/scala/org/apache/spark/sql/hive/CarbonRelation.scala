@@ -20,22 +20,18 @@ import java.util.LinkedHashSet
 
 import scala.Array.canBuildFrom
 import scala.collection.JavaConverters._
-import scala.util.parsing.combinator.RegexParsers
 
 import org.apache.spark.sql.catalyst.analysis.MultiInstanceRelation
 import org.apache.spark.sql.catalyst.expressions.AttributeReference
 import org.apache.spark.sql.catalyst.plans.logical.{LeafNode, LogicalPlan}
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.util.CarbonException
-import org.apache.spark.util.SparkTypeConverter
+import org.apache.spark.sql.util.{CarbonMetastoreTypes, SparkTypeConverter}
 
-import org.apache.carbondata.core.datamap.Segment
 import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.metadata.datatype.DataTypes
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable
-import org.apache.carbondata.core.metadata.schema.table.column.CarbonDimension
+import org.apache.carbondata.core.metadata.schema.table.column.{CarbonColumn, CarbonDimension}
 import org.apache.carbondata.core.statusmanager.SegmentStatusManager
-import org.apache.carbondata.core.util.CarbonUtil
 import org.apache.carbondata.core.util.path.CarbonTablePath
 
 /**
@@ -67,6 +63,9 @@ case class CarbonRelation(
         case "struct" =>
           CarbonMetastoreTypes.toDataType(
             s"struct<${SparkTypeConverter.getStructChildren(carbonTable, dim.getColName)}>")
+        case "map" =>
+          CarbonMetastoreTypes.toDataType(
+            s"map<${SparkTypeConverter.getMapChildren(carbonTable, dim.getColName)}>")
         case dType =>
           val dataType = addDecimalScaleAndPrecision(dimval, dType)
           CarbonMetastoreTypes.toDataType(dataType)
@@ -99,8 +98,15 @@ case class CarbonRelation(
   override val output = {
     val columns = carbonTable.getCreateOrderColumn(carbonTable.getTableName)
       .asScala
+    val partitionColumnSchemas = if (carbonTable.getPartitionInfo() != null) {
+      carbonTable.getPartitionInfo.getColumnSchemaList.asScala
+    } else {
+      Nil
+    }
+    val otherColumns = columns.filterNot(a => partitionColumnSchemas.contains(a.getColumnSchema))
+    val partitionColumns = columns.filter(a => partitionColumnSchemas.contains(a.getColumnSchema))
     // convert each column to Attribute
-    columns.filter(!_.isInvisible).map { column =>
+    (otherColumns ++= partitionColumns).filter(!_.isInvisible).map { column: CarbonColumn =>
       if (column.isDimension()) {
         val output: DataType = column.getDataType.getName.toLowerCase match {
           case "array" =>
@@ -109,12 +115,15 @@ case class CarbonRelation(
           case "struct" =>
             CarbonMetastoreTypes.toDataType(
               s"struct<${SparkTypeConverter.getStructChildren(carbonTable, column.getColName)}>")
+          case "map" =>
+            CarbonMetastoreTypes.toDataType(
+              s"map<${SparkTypeConverter.getMapChildren(carbonTable, column.getColName)}>")
           case dType =>
             val dataType = SparkTypeConverter.addDecimalScaleAndPrecision(column, dType)
             CarbonMetastoreTypes.toDataType(dataType)
         }
         AttributeReference(column.getColName, output, nullable = true )(
-          qualifier = Option(tableName + "." + column.getColName))
+          qualifier = Seq(tableName + "." + column.getColName))
       } else {
         val output = CarbonMetastoreTypes.toDataType {
           column.getDataType.getName.toLowerCase match {
@@ -124,7 +133,7 @@ case class CarbonRelation(
           }
         }
         AttributeReference(column.getColName, output, nullable = true)(
-          qualifier = Option(tableName + "." + column.getColName))
+          qualifier = Seq(tableName + "." + column.getColName))
       }
     }
   }
@@ -160,119 +169,49 @@ case class CarbonRelation(
   private var sizeInBytesLocalValue = 0L
 
   def sizeInBytes: Long = {
-    val tableStatusNewLastUpdatedTime = SegmentStatusManager.getTableStatusLastModifiedTime(
-      carbonTable.getAbsoluteTableIdentifier)
-    if (tableStatusLastUpdateTime != tableStatusNewLastUpdatedTime) {
-      if (new SegmentStatusManager(carbonTable.getAbsoluteTableIdentifier)
-        .getValidAndInvalidSegments.getValidSegments.isEmpty) {
-        sizeInBytesLocalValue = 0L
-      } else {
-        val tablePath = carbonTable.getTablePath
-        val fileType = FileFactory.getFileType(tablePath)
-        if (FileFactory.isFileExist(tablePath, fileType)) {
-          // get the valid segments
-          val segments = new SegmentStatusManager(carbonTable.getAbsoluteTableIdentifier)
-            .getValidAndInvalidSegments.getValidSegments.asScala
-          var size = 0L
-          // for each segment calculate the size
-          segments.foreach {validSeg =>
-            if (validSeg.getSegmentFileName != null) {
-              size = size + CarbonUtil.getSizeOfSegment(
-                carbonTable.getTablePath,
-                new Segment(validSeg.getSegmentNo, validSeg.getSegmentFileName))
-            } else {
-              size = size + FileFactory.getDirectorySize(
-                CarbonTablePath.getSegmentPath(tablePath, validSeg.getSegmentNo))
+    if (carbonTable.isExternalTable) {
+      val tablePath = carbonTable.getTablePath
+      val fileType = FileFactory.getFileType(tablePath)
+      if (FileFactory.isFileExist(tablePath, fileType)) {
+        sizeInBytesLocalValue = FileFactory.getDirectorySize(tablePath)
+      }
+    } else {
+      val tableStatusNewLastUpdatedTime = SegmentStatusManager.getTableStatusLastModifiedTime(
+        carbonTable.getAbsoluteTableIdentifier)
+      if (tableStatusLastUpdateTime != tableStatusNewLastUpdatedTime) {
+        if (new SegmentStatusManager(carbonTable.getAbsoluteTableIdentifier)
+          .getValidAndInvalidSegments.getValidSegments.isEmpty) {
+          sizeInBytesLocalValue = 0L
+        } else {
+          val tablePath = carbonTable.getTablePath
+          val fileType = FileFactory.getFileType(tablePath)
+          if (FileFactory.isFileExist(tablePath, fileType)) {
+            // get the valid segments
+            val segments = new SegmentStatusManager(carbonTable.getAbsoluteTableIdentifier)
+              .getValidAndInvalidSegments.getValidSegments.asScala
+            var size = 0L
+            // for each segment calculate the size
+            segments.foreach { validSeg =>
+              // for older store
+              if (null != validSeg.getLoadMetadataDetails.getDataSize &&
+                  null != validSeg.getLoadMetadataDetails.getIndexSize) {
+                size = size + validSeg.getLoadMetadataDetails.getDataSize.toLong +
+                       validSeg.getLoadMetadataDetails.getIndexSize.toLong
+              } else {
+                size = size + FileFactory.getDirectorySize(
+                  CarbonTablePath.getSegmentPath(tablePath, validSeg.getSegmentNo))
+              }
             }
+            // update the new table status time
+            tableStatusLastUpdateTime = tableStatusNewLastUpdatedTime
+            // update the new size
+            sizeInBytesLocalValue = size
           }
-          // update the new table status time
-          tableStatusLastUpdateTime = tableStatusNewLastUpdatedTime
-          // update the new size
-          sizeInBytesLocalValue = size
         }
       }
     }
+
     sizeInBytesLocalValue
   }
 
-}
-
-object CarbonMetastoreTypes extends RegexParsers {
-  protected lazy val primitiveType: Parser[DataType] =
-    "string" ^^^ StringType |
-    "float" ^^^ FloatType |
-    "int" ^^^ IntegerType |
-    "tinyint" ^^^ ShortType |
-    "short" ^^^ ShortType |
-    "double" ^^^ DoubleType |
-    "long" ^^^ LongType |
-    "binary" ^^^ BinaryType |
-    "boolean" ^^^ BooleanType |
-    fixedDecimalType |
-    "decimal" ^^^ "decimal" ^^^ DecimalType(10, 0) |
-    "varchar\\((\\d+)\\)".r ^^^ StringType |
-    "date" ^^^ DateType |
-    "timestamp" ^^^ TimestampType
-
-  protected lazy val fixedDecimalType: Parser[DataType] =
-    "decimal" ~> "(" ~> "^[1-9]\\d*".r ~ ("," ~> "^[0-9]\\d*".r <~ ")") ^^ {
-      case precision ~ scale =>
-        DecimalType(precision.toInt, scale.toInt)
-    }
-
-  protected lazy val arrayType: Parser[DataType] =
-    "array" ~> "<" ~> dataType <~ ">" ^^ {
-      case tpe => ArrayType(tpe)
-    }
-
-  protected lazy val mapType: Parser[DataType] =
-    "map" ~> "<" ~> dataType ~ "," ~ dataType <~ ">" ^^ {
-      case t1 ~ _ ~ t2 => MapType(t1, t2)
-    }
-
-  protected lazy val structField: Parser[StructField] =
-    "[a-zA-Z0-9_]*".r ~ ":" ~ dataType ^^ {
-      case name ~ _ ~ tpe => StructField(name, tpe, nullable = true)
-    }
-
-  protected lazy val structType: Parser[DataType] =
-    "struct" ~> "<" ~> repsep(structField, ",") <~ ">" ^^ {
-      case fields => StructType(fields)
-    }
-
-  protected lazy val dataType: Parser[DataType] =
-    arrayType |
-    mapType |
-    structType |
-    primitiveType
-
-  def toDataType(metastoreType: String): DataType = {
-    parseAll(dataType, metastoreType) match {
-      case Success(result, _) => result
-      case _: NoSuccess =>
-        CarbonException.analysisException(s"Unsupported dataType: $metastoreType")
-    }
-  }
-
-  def toMetastoreType(dt: DataType): String = {
-    dt match {
-      case ArrayType(elementType, _) => s"array<${ toMetastoreType(elementType) }>"
-      case StructType(fields) =>
-        s"struct<${
-          fields.map(f => s"${ f.name }:${ toMetastoreType(f.dataType) }")
-            .mkString(",")
-        }>"
-      case StringType => "string"
-      case FloatType => "float"
-      case IntegerType => "int"
-      case ShortType => "tinyint"
-      case DoubleType => "double"
-      case LongType => "bigint"
-      case BinaryType => "binary"
-      case BooleanType => "boolean"
-      case DecimalType() => "decimal"
-      case TimestampType => "timestamp"
-      case DateType => "date"
-    }
-  }
 }

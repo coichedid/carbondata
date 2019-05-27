@@ -22,6 +22,7 @@ import java.util
 
 import scala.collection.JavaConverters._
 
+import org.apache.commons.lang3.StringUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.spark.scheduler.{SparkListener, SparkListenerApplicationEnd}
 import org.apache.spark.sql.SparkSession
@@ -29,6 +30,7 @@ import org.apache.spark.sql.execution.streaming.{CarbonAppendableStreamSink, Sin
 
 import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.constants.CarbonCommonConstants
+import org.apache.carbondata.core.datastore.compression.CompressorFactory
 import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.dictionary.server.{DictionaryServer, NonSecureDictionaryServer}
 import org.apache.carbondata.core.dictionary.service.NonSecureDictionaryServiceProvider
@@ -40,6 +42,7 @@ import org.apache.carbondata.core.util.path.CarbonTablePath
 import org.apache.carbondata.events.{OperationContext, OperationListenerBus}
 import org.apache.carbondata.processing.loading.events.LoadEvents.{LoadMetadataEvent, LoadTablePostExecutionEvent, LoadTablePreExecutionEvent, LoadTablePreStatusUpdateEvent}
 import org.apache.carbondata.processing.loading.model.{CarbonLoadModel, CarbonLoadModelBuilder, LoadOption}
+import org.apache.carbondata.processing.util.CarbonBadRecordUtil
 import org.apache.carbondata.spark.dictionary.provider.SecureDictionaryServiceProvider
 import org.apache.carbondata.spark.dictionary.server.SecureDictionaryServer
 import org.apache.carbondata.streaming.segment.StreamSegment
@@ -98,13 +101,8 @@ object StreamSinkFactory {
     val operationContext = new OperationContext
     val loadTablePreExecutionEvent = new LoadTablePreExecutionEvent(
       carbonTable.getCarbonTableIdentifier,
-      carbonLoadModel,
-      carbonLoadModel.getFactFilePath,
-      false,
-      parameters.asJava,
-      parameters.asJava,
-      false
-    )
+      carbonLoadModel
+      )
     OperationListenerBus.getInstance().fireEvent(loadTablePreExecutionEvent, operationContext)
     // prepare the stream segment
     val segmentId = getStreamSegmentId(carbonTable)
@@ -255,6 +253,8 @@ object StreamSinkFactory {
       optionsFinal.put("fileheader", carbonTable.getCreateOrderColumn(carbonTable.getTableName)
         .asScala.map(_.getColName).mkString(","))
     }
+    optionsFinal
+      .put("bad_record_path", CarbonBadRecordUtil.getBadRecordsPath(parameters.asJava, carbonTable))
     val carbonLoadModel = new CarbonLoadModel()
     new CarbonLoadModelBuilder(carbonTable).build(
       parameters.asJava,
@@ -272,6 +272,10 @@ object StreamSinkFactory {
       getConf.get("spark.driver.host")
     carbonLoadModel.setDictionaryServerHost(sparkDriverHost)
     carbonLoadModel.setDictionaryServerPort(dictionaryServerPort.toInt)
+    val columnCompressor = carbonTable.getTableInfo.getFactTable.getTableProperties.asScala
+      .getOrElse(CarbonCommonConstants.COMPRESSOR,
+        CompressorFactory.getInstance().getCompressor.getName)
+    carbonLoadModel.setColumnCompressor(columnCompressor)
     carbonLoadModel
   }
 }

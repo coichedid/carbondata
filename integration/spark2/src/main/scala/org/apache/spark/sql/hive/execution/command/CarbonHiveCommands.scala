@@ -63,20 +63,22 @@ case class CarbonDropDatabaseCommand(command: DropDatabaseCommand)
 }
 
 case class CarbonSetCommand(command: SetCommand)
-  extends RunnableCommand {
+  extends MetadataCommand {
 
   override val output: Seq[Attribute] = command.output
 
-  override def run(sparkSession: SparkSession): Seq[Row] = {
-    val sessionParms = CarbonEnv.getInstance(sparkSession).carbonSessionInfo.getSessionParams
+  override def processMetadata(sparkSession: SparkSession): Seq[Row] = {
+    val sessionParams = CarbonEnv.getInstance(sparkSession).carbonSessionInfo.getSessionParams
     command.kv match {
       case Some((key, Some(value))) =>
-        CarbonSetCommand.validateAndSetValue(sessionParms, key, value)
+        CarbonSetCommand.validateAndSetValue(sessionParams, key, value)
       case _ =>
-
     }
     command.run(sparkSession)
   }
+
+  override protected def opName: String = "SET"
+
 }
 
 object CarbonSetCommand {
@@ -98,6 +100,23 @@ object CarbonSetCommand {
       sessionParams.addProperty(key.toLowerCase(), value)
     } else if (key.startsWith(CarbonCommonConstantsInternal.QUERY_ON_PRE_AGG_STREAMING)) {
       sessionParams.addProperty(key.toLowerCase(), value)
+    } else if (key.startsWith(CarbonCommonConstants.CARBON_DATAMAP_VISIBLE)) {
+      if (key.split("\\.").length == 6) {
+        sessionParams.addProperty(key.toLowerCase, value)
+      } else {
+        throw new MalformedCarbonCommandException("property should be in " +
+          "\" carbon.datamap.visible.<database_name>.<table_name>.<datamap_name>" +
+          " = <true/false> \" format")
+      }
+    } else if (key.startsWith(CarbonCommonConstants.CARBON_LOAD_DATAMAPS_PARALLEL)) {
+      if (key.split("\\.").length == 6) {
+        sessionParams.addProperty(key.toLowerCase(), value)
+      }
+      else {
+        throw new MalformedCarbonCommandException(
+          "property should be in \" carbon.load.datamaps.parallel.<database_name>" +
+          ".<table_name>=<true/false> \" format.")
+      }
     }
   }
 

@@ -19,9 +19,11 @@ package org.apache.carbondata.core.datastore.chunk.reader;
 import java.io.IOException;
 
 import org.apache.carbondata.core.datastore.FileReader;
+import org.apache.carbondata.core.datastore.ReusableDataBuffer;
 import org.apache.carbondata.core.datastore.chunk.impl.MeasureRawColumnChunk;
 import org.apache.carbondata.core.datastore.page.ColumnPage;
 import org.apache.carbondata.core.memory.MemoryException;
+import org.apache.carbondata.core.scan.result.vector.ColumnVectorInfo;
 
 /**
  * Reader interface for reading the measure blocks from file
@@ -49,13 +51,20 @@ public interface MeasureColumnChunkReader {
       throws IOException;
 
   /**
-   * Covert raw data to measure chunk
+   * Convert raw data to measure chunk
    * @param measureRawColumnChunk
    * @param pageNumber
    * @return
    * @throws IOException
    */
-  ColumnPage decodeColumnPage(MeasureRawColumnChunk measureRawColumnChunk,
-      int pageNumber) throws IOException, MemoryException;
+  ColumnPage decodeColumnPage(MeasureRawColumnChunk measureRawColumnChunk, int pageNumber,
+      ReusableDataBuffer reusableDataBuffer) throws IOException, MemoryException;
+
+  /**
+   * Decode raw data and fill the vector
+   */
+  void decodeColumnPageAndFillVector(MeasureRawColumnChunk measureRawColumnChunk, int pageNumber,
+      ColumnVectorInfo vectorInfo, ReusableDataBuffer reusableDataBuffer)
+      throws IOException, MemoryException;
 
 }

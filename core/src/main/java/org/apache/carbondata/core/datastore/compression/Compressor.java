@@ -33,31 +33,21 @@ public interface Compressor {
 
   byte[] compressShort(short[] unCompInput);
 
-  short[] unCompressShort(byte[] compInput);
-
-  short[] unCompressShort(byte[] compInput, int offset, int lenght);
+  short[] unCompressShort(byte[] compInput, int offset, int length);
 
   byte[] compressInt(int[] unCompInput);
-
-  int[] unCompressInt(byte[] compInput);
 
   int[] unCompressInt(byte[] compInput, int offset, int length);
 
   byte[] compressLong(long[] unCompInput);
 
-  long[] unCompressLong(byte[] compInput);
-
   long[] unCompressLong(byte[] compInput, int offset, int length);
 
   byte[] compressFloat(float[] unCompInput);
 
-  float[] unCompressFloat(byte[] compInput);
-
   float[] unCompressFloat(byte[] compInput, int offset, int length);
 
   byte[] compressDouble(double[] unCompInput);
-
-  double[] unCompressDouble(byte[] compInput);
 
   double[] unCompressDouble(byte[] compInput, int offset, int length);
 
@@ -65,5 +55,20 @@ public interface Compressor {
 
   long rawUncompress(byte[] input, byte[] output) throws IOException;
 
-  int maxCompressedLength(int inputSize);
+  long maxCompressedLength(long inputSize);
+
+  /**
+   * Whether this compressor support zero-copy during compression.
+   * Zero-copy means that the compressor support receiving memory address (pointer)
+   * and returning result in memory address (pointer).
+   * Currently not all java version of the compressors support this feature.
+   * @return true if it supports, otherwise return false
+   */
+  boolean supportUnsafe();
+
+  int unCompressedLength(byte[] data, int offset, int length);
+
+  int rawUncompress(byte[] data, int offset, int length, byte[] output);
+
+  boolean supportReusableBuffer();
 }

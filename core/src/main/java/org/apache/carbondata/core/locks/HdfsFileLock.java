@@ -20,11 +20,11 @@ package org.apache.carbondata.core.locks;
 import java.io.DataOutputStream;
 import java.io.IOException;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.datastore.impl.FileFactory;
-import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier;
 import org.apache.carbondata.core.util.path.CarbonTablePath;
+
+import org.apache.log4j.Logger;
 
 /**
  * This class is used to handle the HDFS File locking.
@@ -32,12 +32,8 @@ import org.apache.carbondata.core.util.path.CarbonTablePath;
  */
 public class HdfsFileLock extends AbstractCarbonLock {
 
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
              LogServiceFactory.getLogService(HdfsFileLock.class.getName());
-  /**
-   * lockFilePath is the location of the lock file.
-   */
-  private String lockFilePath;
 
   /**
    * lockFileDir is the directory of the lock file.
@@ -55,22 +51,6 @@ public class HdfsFileLock extends AbstractCarbonLock {
     this.lockFilePath = CarbonTablePath.getLockFilePath(lockFileLocation, lockFile);
     LOGGER.info("HDFS lock path:" + this.lockFilePath);
     initRetry();
-  }
-
-  /**
-   * @param lockFilePath
-   */
-  public HdfsFileLock(String lockFilePath) {
-    this.lockFilePath = lockFilePath;
-    initRetry();
-  }
-
-  /**
-   * @param absoluteTableIdentifier
-   * @param lockFile
-   */
-  public HdfsFileLock(AbsoluteTableIdentifier absoluteTableIdentifier, String lockFile) {
-    this(absoluteTableIdentifier.getTablePath(), lockFile);
   }
 
   /* (non-Javadoc)

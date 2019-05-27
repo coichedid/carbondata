@@ -28,7 +28,6 @@ import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.datastore.page.ColumnPage;
@@ -42,12 +41,14 @@ import org.apache.carbondata.core.metadata.schema.table.column.CarbonDimension;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonMeasure;
 import org.apache.carbondata.core.metadata.schema.table.column.ColumnSchema;
 
+import org.apache.log4j.Logger;
+
 public final class DataTypeUtil {
 
   /**
    * LOGGER
    */
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(DataTypeUtil.class.getName());
 
   private static final ThreadLocal<DateFormat> timeStampformatter = new ThreadLocal<DateFormat>() {
@@ -78,12 +79,11 @@ public final class DataTypeUtil {
    *
    * @param msrValue
    * @param dataType
-   * @param carbonMeasure
    * @return
    */
   public static Object getMeasureValueBasedOnDataType(String msrValue, DataType dataType,
-      CarbonMeasure carbonMeasure) {
-    return getMeasureValueBasedOnDataType(msrValue, dataType,carbonMeasure, false);
+      int scale, int precision) {
+    return getMeasureValueBasedOnDataType(msrValue, dataType, scale, precision, false);
   }
 
   /**
@@ -91,17 +91,16 @@ public final class DataTypeUtil {
    *
    * @param msrValue
    * @param dataType
-   * @param carbonMeasure
    * @return
    */
   public static Object getMeasureValueBasedOnDataType(String msrValue, DataType dataType,
-      CarbonMeasure carbonMeasure, boolean useConverter) {
+      int scale, int precision, boolean useConverter) {
     if (dataType == DataTypes.BOOLEAN) {
       return BooleanConvert.parseBoolean(msrValue);
     } else if (DataTypes.isDecimal(dataType)) {
       BigDecimal bigDecimal =
-          new BigDecimal(msrValue).setScale(carbonMeasure.getScale(), RoundingMode.HALF_UP);
-      BigDecimal decimal = normalizeDecimalValue(bigDecimal, carbonMeasure.getPrecision());
+          new BigDecimal(msrValue).setScale(scale, RoundingMode.HALF_UP);
+      BigDecimal decimal = normalizeDecimalValue(bigDecimal, precision);
       if (useConverter) {
         return converter.convertFromBigDecimalToDecimal(decimal);
       } else {
@@ -113,8 +112,66 @@ public final class DataTypeUtil {
       return Integer.parseInt(msrValue);
     } else if (dataType == DataTypes.LONG) {
       return Long.valueOf(msrValue);
+    } else if (dataType == DataTypes.FLOAT) {
+      return Float.parseFloat(msrValue);
+    } else if (dataType == DataTypes.BYTE) {
+      return Byte.parseByte(msrValue);
     } else {
       Double parsedValue = Double.valueOf(msrValue);
+      if (Double.isInfinite(parsedValue) || Double.isNaN(parsedValue)) {
+        return null;
+      }
+      return parsedValue;
+    }
+  }
+
+  /**
+   * This method will convert a given value to its specific type
+   *
+   * @param dimValue
+   * @param dataType
+   * @return
+   */
+  public static Object getNoDictionaryValueBasedOnDataType(String dimValue, DataType dataType,
+      int scale, int precision, boolean useConverter, String timeStampFormat) {
+    if (dataType == DataTypes.BOOLEAN) {
+      return BooleanConvert.parseBoolean(dimValue);
+    } else if (DataTypes.isDecimal(dataType)) {
+      BigDecimal bigDecimal =
+          new BigDecimal(dimValue).setScale(scale, RoundingMode.HALF_UP);
+      BigDecimal decimal = normalizeDecimalValue(bigDecimal, precision);
+      if (useConverter) {
+        return converter.convertFromBigDecimalToDecimal(decimal);
+      } else {
+        return decimal;
+      }
+    } else if (dataType == DataTypes.SHORT) {
+      return Short.parseShort(dimValue);
+    } else if (dataType == DataTypes.INT) {
+      return Integer.parseInt(dimValue);
+    } else if (dataType == DataTypes.LONG) {
+      return Long.valueOf(dimValue);
+    } else if (dataType == DataTypes.FLOAT) {
+      return Float.parseFloat(dimValue);
+    } else if (dataType == DataTypes.BYTE) {
+      return Byte.parseByte(dimValue);
+    } else if (dataType == DataTypes.TIMESTAMP) {
+      Date dateToStr = null;
+      DateFormat dateFormatter = null;
+      try {
+        if (null != timeStampFormat && !timeStampFormat.trim().isEmpty()) {
+          dateFormatter = new SimpleDateFormat(timeStampFormat);
+          dateFormatter.setLenient(false);
+        } else {
+          dateFormatter = timeStampformatter.get();
+        }
+        dateToStr = dateFormatter.parse(dimValue);
+        return dateToStr.getTime();
+      } catch (ParseException e) {
+        throw new NumberFormatException(e.getMessage());
+      }
+    } else {
+      Double parsedValue = Double.valueOf(dimValue);
       if (Double.isInfinite(parsedValue) || Double.isNaN(parsedValue)) {
         return null;
       }
@@ -135,6 +192,10 @@ public final class DataTypeUtil {
       return (int) bb.getLong();
     } else if (dataType == DataTypes.LONG) {
       return bb.getLong();
+    } else if (dataType == DataTypes.FLOAT) {
+      return bb.getFloat();
+    } else if (dataType == DataTypes.BYTE) {
+      return bb.get();
     } else if (DataTypes.isDecimal(dataType)) {
       return byteToBigDecimal(data);
     } else {
@@ -152,6 +213,10 @@ public final class DataTypeUtil {
       return (int) measurePage.getLong(index);
     } else if (dataType == DataTypes.LONG) {
       return measurePage.getLong(index);
+    } else if (dataType == DataTypes.FLOAT) {
+      return measurePage.getFloat(index);
+    } else if (dataType == DataTypes.BYTE) {
+      return measurePage.getByte(index);
     } else if (DataTypes.isDecimal(dataType)) {
       BigDecimal bigDecimalMsrValue = measurePage.getDecimal(index);
       if (null != bigDecimalMsrValue && carbonMeasure.getScale() > bigDecimalMsrValue.scale()) {
@@ -323,29 +388,37 @@ public final class DataTypeUtil {
       DataType actualDataType, String dateFormat) {
     if (actualDataType == DataTypes.BOOLEAN) {
       return ByteUtil.toBytes(BooleanConvert.parseBoolean(dimensionValue));
-    } else if (actualDataType == DataTypes.STRING) {
-      return ByteUtil.toBytes(dimensionValue);
     } else if (actualDataType == DataTypes.SHORT) {
-      return ByteUtil.toBytes(Short.parseShort(dimensionValue));
+      return ByteUtil.toXorBytes(Short.parseShort(dimensionValue));
     } else if (actualDataType == DataTypes.INT) {
-      return ByteUtil.toBytes(Integer.parseInt(dimensionValue));
+      return ByteUtil.toXorBytes(Integer.parseInt(dimensionValue));
     } else if (actualDataType == DataTypes.LONG) {
-      return ByteUtil.toBytes(Long.parseLong(dimensionValue));
+      return ByteUtil.toXorBytes(Long.parseLong(dimensionValue));
+    } else if (actualDataType == DataTypes.DOUBLE) {
+      return ByteUtil.toXorBytes(Double.parseDouble(dimensionValue));
+    } else if (actualDataType == DataTypes.FLOAT) {
+      return ByteUtil.toXorBytes(Float.parseFloat(dimensionValue));
+    } else if (actualDataType == DataTypes.BYTE) {
+      return new byte[] { Byte.parseByte(dimensionValue) };
+    } else if (DataTypes.isDecimal(actualDataType)) {
+      return bigDecimalToByte(new BigDecimal(dimensionValue));
     } else if (actualDataType == DataTypes.TIMESTAMP) {
       Date dateToStr = null;
       DateFormat dateFormatter = null;
       try {
         if (null != dateFormat && !dateFormat.trim().isEmpty()) {
           dateFormatter = new SimpleDateFormat(dateFormat);
+          dateFormatter.setLenient(false);
         } else {
           dateFormatter = timeStampformatter.get();
         }
         dateToStr = dateFormatter.parse(dimensionValue);
-        return ByteUtil.toBytes(dateToStr.getTime());
+        return ByteUtil.toXorBytes(dateToStr.getTime());
       } catch (ParseException e) {
         throw new NumberFormatException(e.getMessage());
       }
     } else {
+      // Default action for String/Varchar
       return ByteUtil.toBytes(dimensionValue);
     }
   }
@@ -354,20 +427,23 @@ public final class DataTypeUtil {
       DataType actualDataType, String dateFormat) {
     if (actualDataType == DataTypes.BOOLEAN) {
       return BooleanConvert.parseBoolean(dimensionValue);
-    } else if (actualDataType == DataTypes.STRING) {
-      return converter.convertFromStringToUTF8String(dimensionValue);
     } else if (actualDataType == DataTypes.SHORT) {
       return Short.parseShort(dimensionValue);
     } else if (actualDataType == DataTypes.INT) {
       return Integer.parseInt(dimensionValue);
     } else if (actualDataType == DataTypes.LONG) {
       return Long.parseLong(dimensionValue);
+    } else if (actualDataType == DataTypes.DOUBLE) {
+      return Double.parseDouble(dimensionValue);
+    } else if (DataTypes.isDecimal(actualDataType)) {
+      return new BigDecimal(dimensionValue);
     } else if (actualDataType == DataTypes.TIMESTAMP) {
       Date dateToStr = null;
       DateFormat dateFormatter = null;
       try {
         if (null != dateFormat && !dateFormat.trim().isEmpty()) {
           dateFormatter = new SimpleDateFormat(dateFormat);
+          dateFormatter.setLenient(false);
         } else {
           dateFormatter = timeStampformatter.get();
         }
@@ -377,6 +453,7 @@ public final class DataTypeUtil {
         throw new NumberFormatException(e.getMessage());
       }
     } else {
+      // Default action for String/Varchar
       return converter.convertFromStringToUTF8String(dimensionValue);
     }
   }
@@ -392,32 +469,90 @@ public final class DataTypeUtil {
     }
     if (actualDataType == DataTypes.BOOLEAN) {
       return ByteUtil.toBytes((Boolean) dimensionValue);
-    } else if (actualDataType == DataTypes.STRING) {
-      return ByteUtil.toBytes(dimensionValue.toString());
     } else if (actualDataType == DataTypes.SHORT) {
-      return ByteUtil.toBytes((Short) dimensionValue);
+      return ByteUtil.toXorBytes((Short) dimensionValue);
     } else if (actualDataType == DataTypes.INT) {
-      return ByteUtil.toBytes((Integer) dimensionValue);
+      return ByteUtil.toXorBytes((Integer) dimensionValue);
     } else if (actualDataType == DataTypes.LONG) {
-      return ByteUtil.toBytes((Long) dimensionValue);
+      return ByteUtil.toXorBytes((Long) dimensionValue);
     } else if (actualDataType == DataTypes.TIMESTAMP) {
-      return ByteUtil.toBytes((Long)dimensionValue);
+      return ByteUtil.toXorBytes((Long)dimensionValue);
     } else {
+      // Default action for String/Varchar
       return ByteUtil.toBytes(dimensionValue.toString());
     }
   }
 
+  /**
+   * Convert the min/max values to bytes for no dictionary column
+   *
+   * @param dimensionValue
+   * @param actualDataType
+   * @return
+   */
+  public static byte[] getMinMaxBytesBasedOnDataTypeForNoDictionaryColumn(Object dimensionValue,
+      DataType actualDataType) {
+    if (dimensionValue == null) {
+      if (actualDataType == DataTypes.STRING) {
+        return CarbonCommonConstants.MEMBER_DEFAULT_VAL_ARRAY;
+      } else {
+        return new byte[0];
+      }
+    }
+    if (actualDataType == DataTypes.BOOLEAN) {
+      return ByteUtil.toBytes(Boolean.valueOf(ByteUtil.toBoolean((byte) dimensionValue)));
+    } else if (actualDataType == DataTypes.SHORT) {
+      return ByteUtil.toXorBytes((Short) dimensionValue);
+    } else if (actualDataType == DataTypes.INT) {
+      return ByteUtil.toXorBytes((Integer) dimensionValue);
+    } else if (actualDataType == DataTypes.LONG) {
+      return ByteUtil.toXorBytes((Long) dimensionValue);
+    } else if (actualDataType == DataTypes.TIMESTAMP) {
+      return ByteUtil.toXorBytes((Long)dimensionValue);
+    } else {
+      // Default action for String/Varchar
+      return ByteUtil.toBytes(dimensionValue.toString());
+    }
+  }
+
+  /**
+   * Returns true for fixed length DataTypes.
+   * @param dataType
+   * @return
+   */
+  public static boolean isFixedSizeDataType(DataType dataType) {
+    if (dataType == DataTypes.STRING ||
+        dataType == DataTypes.VARCHAR ||
+        DataTypes.isDecimal(dataType)) {
+      return false;
+    } else {
+      return true;
+    }
+  }
+
+  /**
+   * Wrapper for actual getDataBasedOnDataTypeForNoDictionaryColumn.
+   *
+   * @param dataInBytes
+   * @param actualDataType
+   * @return
+   */
+  public static Object getDataBasedOnDataTypeForNoDictionaryColumn(byte[] dataInBytes,
+      DataType actualDataType) {
+    return getDataBasedOnDataTypeForNoDictionaryColumn(dataInBytes, actualDataType, true);
+  }
 
   /**
    * Below method will be used to convert the data passed to its actual data
    * type
    *
-   * @param dataInBytes    data
-   * @param actualDataType actual data type
+   * @param dataInBytes           data
+   * @param actualDataType        actual data type
+   * @param isTimeStampConversion
    * @return actual data after conversion
    */
   public static Object getDataBasedOnDataTypeForNoDictionaryColumn(byte[] dataInBytes,
-      DataType actualDataType) {
+      DataType actualDataType, boolean isTimeStampConversion) {
     if (null == dataInBytes || Arrays
         .equals(CarbonCommonConstants.MEMBER_DEFAULT_VAL_ARRAY, dataInBytes)) {
       return null;
@@ -425,32 +560,52 @@ public final class DataTypeUtil {
     try {
       if (actualDataType == DataTypes.BOOLEAN) {
         return ByteUtil.toBoolean(dataInBytes);
-      } else if (actualDataType == DataTypes.STRING) {
-        return getDataTypeConverter().convertFromByteToUTF8String(dataInBytes);
+      } else if (actualDataType == DataTypes.BYTE) {
+        return dataInBytes[0];
       } else if (actualDataType == DataTypes.SHORT) {
         // for non string type no dictionary column empty byte array is empty value
         // so no need to parse
         if (isEmptyByteArray(dataInBytes)) {
           return null;
         }
-        return ByteUtil.toShort(dataInBytes, 0, dataInBytes.length);
+        return ByteUtil.toXorShort(dataInBytes, 0, dataInBytes.length);
       } else if (actualDataType == DataTypes.INT) {
         if (isEmptyByteArray(dataInBytes)) {
           return null;
         }
-        return ByteUtil.toInt(dataInBytes, 0, dataInBytes.length);
+        return ByteUtil.toXorInt(dataInBytes, 0, dataInBytes.length);
       } else if (actualDataType == DataTypes.LONG) {
         if (isEmptyByteArray(dataInBytes)) {
           return null;
         }
-        return ByteUtil.toLong(dataInBytes, 0, dataInBytes.length);
+        return ByteUtil.toXorLong(dataInBytes, 0, dataInBytes.length);
       } else if (actualDataType == DataTypes.TIMESTAMP) {
         if (isEmptyByteArray(dataInBytes)) {
           return null;
         }
-        return ByteUtil.toLong(dataInBytes, 0, dataInBytes.length) * 1000L;
+        if (isTimeStampConversion) {
+          return ByteUtil.toXorLong(dataInBytes, 0, dataInBytes.length) * 1000L;
+        } else {
+          return ByteUtil.toXorLong(dataInBytes, 0, dataInBytes.length);
+        }
+      } else if (actualDataType == DataTypes.DOUBLE) {
+        if (isEmptyByteArray(dataInBytes)) {
+          return null;
+        }
+        return ByteUtil.toXorDouble(dataInBytes, 0, dataInBytes.length);
+      } else if (actualDataType == DataTypes.FLOAT) {
+        if (isEmptyByteArray(dataInBytes)) {
+          return null;
+        }
+        return ByteUtil.toXorFloat(dataInBytes, 0, dataInBytes.length);
+      } else if (DataTypes.isDecimal(actualDataType)) {
+        if (isEmptyByteArray(dataInBytes)) {
+          return null;
+        }
+        return getDataTypeConverter().convertFromBigDecimalToDecimal(byteToBigDecimal(dataInBytes));
       } else {
-        return ByteUtil.toString(dataInBytes, 0, dataInBytes.length);
+        // Default action for String/Varchar
+        return getDataTypeConverter().convertFromByteToUTF8String(dataInBytes);
       }
     } catch (Throwable ex) {
       String data = new String(dataInBytes, CarbonCommonConstants.DEFAULT_CHARSET_CLASS);
@@ -569,20 +724,16 @@ public final class DataTypeUtil {
       return null;
     }
     try {
-      Object parsedValue = null;
       if (actualDataType == DataTypes.SHORT) {
-        parsedValue = Short.parseShort(data);
+        Short.parseShort(data);
       } else if (actualDataType == DataTypes.INT) {
-        parsedValue = Integer.parseInt(data);
+        Integer.parseInt(data);
       } else if (actualDataType == DataTypes.LONG) {
-        parsedValue = Long.parseLong(data);
+        Long.parseLong(data);
       } else {
         return data;
       }
-      if (null != parsedValue) {
-        return data;
-      }
-      return null;
+      return data;
     } catch (NumberFormatException ex) {
       return null;
     }
@@ -731,7 +882,7 @@ public final class DataTypeUtil {
           try {
             timeStampformatter.remove();
             Date dateToStr = timeStampformatter.get().parse(data);
-            return ByteUtil.toBytes(dateToStr.getTime());
+            return ByteUtil.toXorBytes(dateToStr.getTime());
           } catch (ParseException e) {
             LOGGER.error(
                 "Cannot convert value to Time/Long type value. Value is considered as null" + e
@@ -840,6 +991,8 @@ public final class DataTypeUtil {
       return DataTypes.FLOAT;
     } else if (DataTypes.DOUBLE.getName().equalsIgnoreCase(name)) {
       return DataTypes.DOUBLE;
+    } else if (DataTypes.VARCHAR.getName().equalsIgnoreCase(name)) {
+      return DataTypes.VARCHAR;
     } else if (DataTypes.NULL.getName().equalsIgnoreCase(name)) {
       return DataTypes.NULL;
     } else if (DataTypes.BYTE_ARRAY.getName().equalsIgnoreCase(name)) {
@@ -888,6 +1041,8 @@ public final class DataTypeUtil {
       return DataTypes.FLOAT;
     } else if (DataTypes.DOUBLE.getName().equalsIgnoreCase(dataType.getName())) {
       return DataTypes.DOUBLE;
+    } else if (DataTypes.VARCHAR.getName().equalsIgnoreCase(dataType.getName())) {
+      return DataTypes.VARCHAR;
     } else if (DataTypes.NULL.getName().equalsIgnoreCase(dataType.getName())) {
       return DataTypes.NULL;
     } else if (DataTypes.BYTE_ARRAY.getName().equalsIgnoreCase(dataType.getName())) {
@@ -922,11 +1077,27 @@ public final class DataTypeUtil {
       int currentDataOffset, int length) {
     long value = 0L;
     if (restructuredDataType == DataTypes.INT) {
-      value = ByteUtil.toInt(data, currentDataOffset, length);
+      value = ByteUtil.toXorInt(data, currentDataOffset, length);
     } else if (restructuredDataType == DataTypes.LONG) {
-      value = ByteUtil.toLong(data, currentDataOffset, length);
+      value = ByteUtil.toXorLong(data, currentDataOffset, length);
     }
     return value;
+  }
+
+  /**
+   * Check if the column is a no dictionary primitive column
+   *
+   * @param dataType
+   * @return
+   */
+  public static boolean isPrimitiveColumn(DataType dataType) {
+    if (dataType == DataTypes.BOOLEAN || dataType == DataTypes.BYTE || dataType == DataTypes.SHORT
+        || dataType == DataTypes.INT || dataType == DataTypes.LONG
+        || dataType == DataTypes.TIMESTAMP || DataTypes.isDecimal(dataType)
+        || dataType == DataTypes.FLOAT || dataType == DataTypes.DOUBLE) {
+      return true;
+    }
+    return false;
   }
 
 }

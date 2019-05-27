@@ -17,8 +17,10 @@
 
 package org.apache.carbondata.core.datastore.page;
 
-import org.apache.carbondata.core.datastore.TableSpec;
-import org.apache.carbondata.core.metadata.datatype.DataType;
+import java.math.BigDecimal;
+
+import org.apache.carbondata.core.datastore.page.encoding.ColumnPageEncoderMeta;
+import org.apache.carbondata.core.metadata.datatype.DataTypes;
 import org.apache.carbondata.core.metadata.datatype.DecimalConverterFactory;
 
 /**
@@ -31,10 +33,11 @@ public abstract class DecimalColumnPage extends VarLengthColumnPageBase {
    */
   DecimalConverterFactory.DecimalConverter decimalConverter;
 
-  DecimalColumnPage(TableSpec.ColumnSpec columnSpec, DataType dataType, int pageSize) {
-    super(columnSpec, dataType, pageSize);
-    decimalConverter = DecimalConverterFactory.INSTANCE
-        .getDecimalConverter(columnSpec.getPrecision(), columnSpec.getScale());
+  DecimalColumnPage(ColumnPageEncoderMeta columnPageEncoderMeta, int pageSize) {
+    super(columnPageEncoderMeta, pageSize);
+    decimalConverter = DecimalConverterFactory.INSTANCE.getDecimalConverter(
+        columnPageEncoderMeta.getColumnSpec().getPrecision(),
+        columnPageEncoderMeta.getColumnSpec().getScale());
   }
 
   public DecimalConverterFactory.DecimalConverter getDecimalConverter() {
@@ -43,67 +46,130 @@ public abstract class DecimalColumnPage extends VarLengthColumnPageBase {
 
   @Override
   public byte[] getBytePage() {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public short[] getShortPage() {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public byte[] getShortIntPage() {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public int[] getIntPage() {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public long[] getLongPage() {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public float[] getFloatPage() {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public double[] getDoublePage() {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public byte[][] getByteArrayPage() {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public float getFloat(int rowId) {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public double getDouble(int rowId) {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public void putDouble(int rowId, double value) {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
+  }
+
+  @Override public void putFloat(int rowId, float value) {
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public void setFloatPage(float[] floatData) {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
   }
 
   @Override
   public void setDoublePage(double[] doubleData) {
-    throw new UnsupportedOperationException("invalid data type: " + dataType);
+    throw new UnsupportedOperationException(
+        "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
+  }
+
+  // used for building datamap in loading process
+  private BigDecimal getDecimalFromRawData(int rowId) {
+    long value;
+    switch (decimalConverter.getDecimalConverterType()) {
+      case DECIMAL_INT:
+        value = getInt(rowId);
+        break;
+      case DECIMAL_LONG:
+        value = getLong(rowId);
+        break;
+      default:
+        value = getByte(rowId);
+    }
+    return decimalConverter.getDecimal(value);
+  }
+
+  private BigDecimal getDecimalFromDecompressData(int rowId) {
+    long value;
+    if (columnPageEncoderMeta.getStoreDataType() == DataTypes.BYTE) {
+      value = getByte(rowId);
+    } else if (columnPageEncoderMeta.getStoreDataType() == DataTypes.SHORT) {
+      value = getShort(rowId);
+    } else if (columnPageEncoderMeta.getStoreDataType() == DataTypes.SHORT_INT) {
+      value = getShortInt(rowId);
+    } else if (columnPageEncoderMeta.getStoreDataType() == DataTypes.INT) {
+      value = getInt(rowId);
+    } else if (columnPageEncoderMeta.getStoreDataType() == DataTypes.LONG) {
+      value = getLong(rowId);
+    } else {
+      return decimalConverter.getDecimal(getBytes(rowId));
+    }
+    return decimalConverter.getDecimal(value);
+  }
+
+  @Override
+  public BigDecimal getDecimal(int rowId) {
+    // rowOffset is initialed for query in `VarLengthColumnPageBase.getDecimalColumnPage`
+    // if its size is 0, we are in loading process and the data in column page is raw
+    if (rowOffset.getActualRowCount() == 0) {
+      return getDecimalFromRawData(rowId);
+    } else {
+      return getDecimalFromDecompressData(rowId);
+    }
   }
 
 }

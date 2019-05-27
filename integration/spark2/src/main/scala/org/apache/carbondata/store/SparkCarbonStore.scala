@@ -22,11 +22,12 @@ import java.io.IOException
 import scala.collection.JavaConverters._
 
 import org.apache.spark.{CarbonInputMetrics, SparkConf}
+import org.apache.spark.sql.{CarbonEnv, SparkSession}
 import org.apache.spark.sql.CarbonSession._
-import org.apache.spark.sql.SparkSession
 
 import org.apache.carbondata.common.annotations.InterfaceAudience
 import org.apache.carbondata.core.datastore.row.CarbonRow
+import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier
 import org.apache.carbondata.core.scan.expression.Expression
 import org.apache.carbondata.hadoop.CarbonProjection
 import org.apache.carbondata.spark.rdd.CarbonScanRDD
@@ -36,7 +37,7 @@ import org.apache.carbondata.spark.rdd.CarbonScanRDD
  * with CarbonData query optimization capability
  */
 @InterfaceAudience.Internal
-private[store] class SparkCarbonStore extends MetaCachedCarbonStore {
+class SparkCarbonStore extends MetaCachedCarbonStore {
   private var session: SparkSession = _
 
   /**
@@ -54,21 +55,29 @@ private[store] class SparkCarbonStore extends MetaCachedCarbonStore {
       .getOrCreateCarbonSession()
   }
 
-  @throws[IOException]
-  override def scan(
-      path: String,
-      projectColumns: Array[String]): java.util.Iterator[CarbonRow] = {
-    scan(path, projectColumns, null)
+  def this(sparkSession: SparkSession) = {
+    this()
+    session = sparkSession
   }
 
   @throws[IOException]
   override def scan(
-      path: String,
+      tableIdentifier: AbsoluteTableIdentifier,
+      projectColumns: Array[String]): java.util.Iterator[CarbonRow] = {
+    require(tableIdentifier != null)
+    require(projectColumns != null)
+    scan(tableIdentifier, projectColumns, null)
+  }
+
+  @throws[IOException]
+  override def scan(
+      tableIdentifier: AbsoluteTableIdentifier,
       projectColumns: Array[String],
       filter: Expression): java.util.Iterator[CarbonRow] = {
-    require(path != null)
+    require(tableIdentifier != null)
     require(projectColumns != null)
-    val table = getTable(path)
+    val table = CarbonEnv
+      .getCarbonTable(Some(tableIdentifier.getDatabaseName), tableIdentifier.getTableName)(session)
     val rdd = new CarbonScanRDD[CarbonRow](
       spark = session,
       columnProjection = new CarbonProjection(projectColumns),

@@ -22,7 +22,6 @@ import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.charset.Charset;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.util.CarbonProperties;
@@ -52,6 +51,7 @@ import org.apache.hadoop.mapreduce.TaskAttemptContext;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.input.FileSplit;
 import org.apache.hadoop.util.LineReader;
+import org.apache.log4j.Logger;
 
 /**
  * An {@link org.apache.hadoop.mapreduce.InputFormat} for csv files.  Files are broken into lines.
@@ -77,7 +77,7 @@ public class CSVInputFormat extends FileInputFormat<NullWritable, StringArrayWri
   public static final int DEFAULT_MAX_NUMBER_OF_COLUMNS_FOR_PARSING = 2000;
   public static final int THRESHOLD_MAX_NUMBER_OF_COLUMNS_FOR_PARSING = 20000;
 
-  private static LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(CSVInputFormat.class.toString());
 
 
@@ -205,11 +205,16 @@ public class CSVInputFormat extends FileInputFormat<NullWritable, StringArrayWri
     parserSettings.setSkipEmptyLines(
         Boolean.valueOf(job.get(SKIP_EMPTY_LINE,
             CarbonCommonConstants.CARBON_SKIP_EMPTY_LINE_DEFAULT)));
-    parserSettings.setMaxCharsPerColumn(CarbonCommonConstants.MAX_CHARS_PER_COLUMN_DEFAULT);
+    // todo: will verify whether there is a performance degrade using -1 here
+    // parserSettings.setMaxCharsPerColumn(CarbonCommonConstants.MAX_CHARS_PER_COLUMN_DEFAULT);
+    parserSettings.setMaxCharsPerColumn(CarbonCommonConstants.MAX_CHARS_PER_COLUMN_INFINITY);
     String maxColumns = job.get(MAX_COLUMNS, "" + DEFAULT_MAX_NUMBER_OF_COLUMNS_FOR_PARSING);
     parserSettings.setMaxColumns(Integer.parseInt(maxColumns));
     parserSettings.getFormat().setQuote(job.get(QUOTE, QUOTE_DEFAULT).charAt(0));
     parserSettings.getFormat().setQuoteEscape(job.get(ESCAPE, ESCAPE_DEFAULT).charAt(0));
+    // setting the content length to to limit the length of displayed contents being parsed/written
+    // in the exception message when an error occurs.
+    parserSettings.setErrorContentLength(CarbonCommonConstants.CARBON_ERROR_CONTENT_LENGTH);
     return parserSettings;
   }
 

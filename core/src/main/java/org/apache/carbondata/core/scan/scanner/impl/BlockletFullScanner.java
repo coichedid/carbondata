@@ -19,7 +19,6 @@ package org.apache.carbondata.core.scan.scanner.impl;
 import java.io.IOException;
 
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
-import org.apache.carbondata.core.constants.CarbonV3DataFormatConstants;
 import org.apache.carbondata.core.datastore.DataRefNode;
 import org.apache.carbondata.core.datastore.chunk.DimensionColumnPage;
 import org.apache.carbondata.core.datastore.chunk.impl.DimensionRawColumnChunk;
@@ -31,6 +30,7 @@ import org.apache.carbondata.core.scan.processor.RawBlockletColumnChunks;
 import org.apache.carbondata.core.scan.result.BlockletScannedResult;
 import org.apache.carbondata.core.scan.result.impl.NonFilterQueryScannedResult;
 import org.apache.carbondata.core.scan.scanner.BlockletScanner;
+import org.apache.carbondata.core.scan.scanner.LazyBlockletLoader;
 import org.apache.carbondata.core.stats.QueryStatistic;
 import org.apache.carbondata.core.stats.QueryStatisticsConstants;
 import org.apache.carbondata.core.stats.QueryStatisticsModel;
@@ -61,7 +61,8 @@ public class BlockletFullScanner implements BlockletScanner {
       RawBlockletColumnChunks rawBlockletColumnChunks)
       throws IOException, FilterUnsupportedException {
     long startTime = System.currentTimeMillis();
-    BlockletScannedResult scannedResult = new NonFilterQueryScannedResult(blockExecutionInfo);
+    BlockletScannedResult scannedResult =
+        new NonFilterQueryScannedResult(blockExecutionInfo, queryStatisticsModel);
     QueryStatistic totalBlockletStatistic = queryStatisticsModel.getStatisticsTypeAndObjMap()
         .get(QueryStatisticsConstants.TOTAL_BLOCKLET_NUM);
     totalBlockletStatistic.addCountStatistic(QueryStatisticsConstants.TOTAL_BLOCKLET_NUM,
@@ -81,12 +82,9 @@ public class BlockletFullScanner implements BlockletScanner {
         .get(QueryStatisticsConstants.TOTAL_PAGE_SCANNED);
     totalPagesScanned.addCountStatistic(QueryStatisticsConstants.TOTAL_PAGE_SCANNED,
         totalPagesScanned.getCount() + rawBlockletColumnChunks.getDataBlock().numberOfPages());
-    scannedResult.setBlockletId(
-        blockExecutionInfo.getBlockIdString() + CarbonCommonConstants.FILE_SEPARATOR +
-            rawBlockletColumnChunks.getDataBlock().blockletIndex());
-    if (!blockExecutionInfo.isPrefetchBlocklet()) {
-      readBlocklet(rawBlockletColumnChunks);
-    }
+    String blockletId = blockExecutionInfo.getBlockIdString() + CarbonCommonConstants.FILE_SEPARATOR
+        + rawBlockletColumnChunks.getDataBlock().blockletIndex();
+    scannedResult.setBlockletId(blockletId);
     DimensionRawColumnChunk[] dimensionRawColumnChunks =
         rawBlockletColumnChunks.getDimensionRawColumnChunks();
     DimensionColumnPage[][] dimensionColumnDataChunks =
@@ -117,23 +115,20 @@ public class BlockletFullScanner implements BlockletScanner {
         }
       }
     }
-
+    scannedResult.setLazyBlockletLoader(
+        new LazyBlockletLoader(rawBlockletColumnChunks, blockExecutionInfo,
+            dimensionRawColumnChunks, measureRawColumnChunks, queryStatisticsModel));
     // count(*)  case there would not be any dimensions are measures selected.
     if (numberOfRows == null) {
       numberOfRows = new int[rawBlockletColumnChunks.getDataBlock().numberOfPages()];
       for (int i = 0; i < numberOfRows.length; i++) {
-        numberOfRows[i] =
-            CarbonV3DataFormatConstants.NUMBER_OF_ROWS_PER_BLOCKLET_COLUMN_PAGE_DEFAULT;
-      }
-      int lastPageSize = rawBlockletColumnChunks.getDataBlock().numRows()
-          % CarbonV3DataFormatConstants.NUMBER_OF_ROWS_PER_BLOCKLET_COLUMN_PAGE_DEFAULT;
-      ;
-      if (lastPageSize > 0) {
-        numberOfRows[numberOfRows.length - 1] = lastPageSize;
+        numberOfRows[i] = rawBlockletColumnChunks.getDataBlock().getPageRowCount(i);
       }
     }
     scannedResult.setPageFilteredRowCount(numberOfRows);
-    scannedResult.fillDataChunks();
+    if (!blockExecutionInfo.isDirectVectorFill()) {
+      scannedResult.fillDataChunks();
+    }
     // adding statistics for carbon scan time
     QueryStatistic scanTime = queryStatisticsModel.getStatisticsTypeAndObjMap()
         .get(QueryStatisticsConstants.SCAN_BLOCKlET_TIME);
@@ -163,7 +158,7 @@ public class BlockletFullScanner implements BlockletScanner {
 
   BlockletScannedResult createEmptyResult() {
     if (emptyResult == null) {
-      emptyResult = new NonFilterQueryScannedResult(blockExecutionInfo);
+      emptyResult = new NonFilterQueryScannedResult(blockExecutionInfo, queryStatisticsModel);
       emptyResult.setPageFilteredRowCount(new int[0]);
       emptyResult.setPageFilteredRowId(new int[0][]);
     }

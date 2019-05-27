@@ -24,7 +24,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.apache.carbondata.common.CarbonIterator;
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.datastore.exception.CarbonDataWriterException;
 import org.apache.carbondata.core.datastore.row.CarbonRow;
@@ -41,6 +40,8 @@ import org.apache.carbondata.processing.loading.sort.unsafe.merger.UnsafeSingleT
 import org.apache.carbondata.processing.sort.exception.CarbonSortKeyAndGroupByException;
 import org.apache.carbondata.processing.sort.sortdata.SortParameters;
 
+import org.apache.log4j.Logger;
+
 /**
  * It parallely reads data from array of iterates and do merge sort.
  * First it sorts the data and write to temp files. These temp files will be merge sorted to get
@@ -48,7 +49,7 @@ import org.apache.carbondata.processing.sort.sortdata.SortParameters;
  */
 public class UnsafeParallelReadMergeSorterImpl extends AbstractMergeSorter {
 
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(UnsafeParallelReadMergeSorterImpl.class.getName());
 
   private SortParameters sortParameters;
@@ -96,7 +97,9 @@ public class UnsafeParallelReadMergeSorterImpl extends AbstractMergeSorter {
       }
       executorService.shutdown();
       executorService.awaitTermination(2, TimeUnit.DAYS);
-      processRowToNextStep(sortDataRow, sortParameters);
+      if (!sortParameters.getObserver().isFailed()) {
+        processRowToNextStep(sortDataRow, sortParameters);
+      }
     } catch (Exception e) {
       checkError();
       throw new CarbonDataLoadingException("Problem while shutdown the server ", e);
@@ -146,14 +149,6 @@ public class UnsafeParallelReadMergeSorterImpl extends AbstractMergeSorter {
    */
   private boolean processRowToNextStep(UnsafeSortDataRows sortDataRows, SortParameters parameters)
       throws CarbonDataLoadingException {
-    if (null == sortDataRows) {
-      LOGGER.info("Record Processed For table: " + parameters.getTableName());
-      LOGGER.info("Number of Records was Zero");
-      String logMessage = "Summary: Carbon Sort Key Step: Read: " + 0 + ": Write: " + 0;
-      LOGGER.info(logMessage);
-      return false;
-    }
-
     try {
       // start sorting
       sortDataRows.startSorting();

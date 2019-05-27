@@ -24,7 +24,9 @@ import org.apache.spark.sql.execution.command.{AlterTableAddColumnsModel, AlterT
 import org.apache.spark.sql.hive.CarbonSessionCatalog
 import org.apache.spark.util.AlterTableUtil
 
-import org.apache.carbondata.common.logging.{LogService, LogServiceFactory}
+import org.apache.carbondata.common.exceptions.sql.MalformedCarbonCommandException
+import org.apache.carbondata.common.logging.LogServiceFactory
+import org.apache.carbondata.core.features.TableOperation
 import org.apache.carbondata.core.locks.{ICarbonLock, LockUsage}
 import org.apache.carbondata.core.metadata.converter.ThriftWrapperSchemaConverterImpl
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable
@@ -37,11 +39,11 @@ private[sql] case class CarbonAlterTableAddColumnCommand(
   extends MetadataCommand {
 
   override def processMetadata(sparkSession: SparkSession): Seq[Row] = {
-    val LOGGER: LogService = LogServiceFactory.getLogService(this.getClass.getCanonicalName)
+    val LOGGER = LogServiceFactory.getLogService(this.getClass.getCanonicalName)
     val tableName = alterTableAddColumnsModel.tableName
     val dbName = alterTableAddColumnsModel.databaseName
       .getOrElse(sparkSession.catalog.currentDatabase)
-    LOGGER.audit(s"Alter table add columns request has been received for $dbName.$tableName")
+    setAuditTable(dbName, tableName)
     val locksToBeAcquired = List(LockUsage.METADATA_LOCK, LockUsage.COMPACTION_LOCK)
     var locks = List.empty[ICarbonLock]
     var timeStamp = 0L
@@ -57,6 +59,10 @@ private[sql] case class CarbonAlterTableAddColumnCommand(
       // up relation should be called after acquiring the lock
       val metastore = CarbonEnv.getInstance(sparkSession).carbonMetastore
       carbonTable = CarbonEnv.getCarbonTable(Some(dbName), tableName)(sparkSession)
+      if (!carbonTable.canAllow(carbonTable, TableOperation.ALTER_ADD_COLUMN)) {
+        throw new MalformedCarbonCommandException(
+          "alter table add column is not supported for index datamap")
+      }
       val operationContext = new OperationContext
       val alterTableAddColumnListener = AlterTableAddColumnPreEvent(sparkSession, carbonTable,
         alterTableAddColumnsModel)
@@ -75,8 +81,10 @@ private[sql] case class CarbonAlterTableAddColumnCommand(
         wrapperTableInfo,
         carbonTable.getAbsoluteTableIdentifier,
         sparkSession.sparkContext).process
+      setAuditInfo(Map(
+        "newColumn" -> newCols.map(x => s"${x.getColumnName}:${x.getDataType}").mkString(",")))
       // generate dictionary files for the newly added columns
-      new AlterTableAddColumnRDD(sparkSession.sparkContext,
+      new AlterTableAddColumnRDD(sparkSession,
         newCols,
         carbonTable.getAbsoluteTableIdentifier).collect()
       timeStamp = System.currentTimeMillis
@@ -85,23 +93,24 @@ private[sql] case class CarbonAlterTableAddColumnCommand(
       schemaEvolutionEntry.setAdded(newCols.toList.asJava)
       val thriftTable = schemaConverter
         .fromWrapperToExternalTableInfo(wrapperTableInfo, dbName, tableName)
-      AlterTableUtil
-        .updateSchemaInfo(carbonTable,
+      val (tableIdentifier, schemaParts, cols) = AlterTableUtil.updateSchemaInfo(
+          carbonTable,
           schemaConverter.fromWrapperToExternalSchemaEvolutionEntry(schemaEvolutionEntry),
-          thriftTable)(sparkSession,
-          sparkSession.sessionState.catalog.asInstanceOf[CarbonSessionCatalog])
+          thriftTable,
+          Some(newCols))(sparkSession)
+      sparkSession.sessionState.catalog.asInstanceOf[CarbonSessionCatalog].alterAddColumns(
+        tableIdentifier, schemaParts, cols)
+      sparkSession.catalog.refreshTable(tableIdentifier.quotedString)
       val alterTablePostExecutionEvent: AlterTableAddColumnPostEvent =
         new AlterTableAddColumnPostEvent(sparkSession,
           carbonTable, alterTableAddColumnsModel)
       OperationListenerBus.getInstance.fireEvent(alterTablePostExecutionEvent, operationContext)
       LOGGER.info(s"Alter table for add columns is successful for table $dbName.$tableName")
-      LOGGER.audit(s"Alter table for add columns is successful for table $dbName.$tableName")
     } catch {
       case e: Exception =>
-        LOGGER.error(e, "Alter table add columns failed")
         if (newCols.nonEmpty) {
           LOGGER.info("Cleaning up the dictionary files as alter table add operation failed")
-          new AlterTableDropColumnRDD(sparkSession.sparkContext,
+          new AlterTableDropColumnRDD(sparkSession,
             newCols,
             carbonTable.getAbsoluteTableIdentifier).collect()
           AlterTableUtil.revertAddColumnChanges(dbName, tableName, timeStamp)(sparkSession)
@@ -114,4 +123,6 @@ private[sql] case class CarbonAlterTableAddColumnCommand(
     }
     Seq.empty
   }
+
+  override protected def opName: String = "ALTER TABLE ADD COLUMN"
 }

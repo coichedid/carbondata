@@ -27,10 +27,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
-import org.apache.carbondata.core.constants.CarbonLoadOptionConstants;
 import org.apache.carbondata.core.memory.UnsafeSortMemoryManager;
 import org.apache.carbondata.core.util.CarbonProperties;
 import org.apache.carbondata.core.util.CarbonThreadFactory;
@@ -38,12 +36,14 @@ import org.apache.carbondata.processing.loading.sort.unsafe.UnsafeCarbonRowPage;
 import org.apache.carbondata.processing.sort.exception.CarbonSortKeyAndGroupByException;
 import org.apache.carbondata.processing.sort.sortdata.SortParameters;
 
+import org.apache.log4j.Logger;
+
 /**
  * It does mergesort intermediate files to big file.
  */
 public class UnsafeIntermediateMerger {
 
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(UnsafeIntermediateMerger.class.getName());
 
   /**
@@ -76,22 +76,20 @@ public class UnsafeIntermediateMerger {
     this.mergedPages = new ArrayList<>();
     this.executorService = Executors.newFixedThreadPool(parameters.getNumberOfCores(),
         new CarbonThreadFactory("UnsafeIntermediatePool:" + parameters.getTableName()));
-    this.procFiles = new ArrayList<File>(CarbonCommonConstants.CONSTANT_SIZE_TEN);
+    this.procFiles = new ArrayList<>(CarbonCommonConstants.CONSTANT_SIZE_TEN);
     this.mergerTask = new ArrayList<>();
 
-    Integer spillPercentage;
-    try {
-      String spillPercentageStr = CarbonProperties.getInstance().getProperty(
-          CarbonLoadOptionConstants.CARBON_LOAD_SORT_MEMORY_SPILL_PERCENTAGE,
-          CarbonLoadOptionConstants.CARBON_LOAD_SORT_MEMORY_SPILL_PERCENTAGE_DEFAULT);
-      spillPercentage = Integer.valueOf(spillPercentageStr);
-    } catch (NumberFormatException e) {
-      spillPercentage = Integer.valueOf(
-          CarbonLoadOptionConstants.CARBON_LOAD_SORT_MEMORY_SPILL_PERCENTAGE_DEFAULT);
-    }
-
+    Integer spillPercentage = CarbonProperties.getInstance().getSortMemorySpillPercentage();
     this.spillSizeInSortMemory =
         UnsafeSortMemoryManager.INSTANCE.getUsableMemory() * spillPercentage / 100;
+    // get memory chunk size
+    long inMemoryChunkSizeInMB = CarbonProperties.getInstance().getSortMemoryChunkSizeInMB();
+    if (spillSizeInSortMemory < inMemoryChunkSizeInMB * 1024 * 1024) {
+      LOGGER.warn("the configure spill size is " + spillSizeInSortMemory +
+          " less than the page size " + inMemoryChunkSizeInMB * 1024 * 1024 +
+          ",so no merge and spill in-memory pages to disk");
+    }
+
   }
 
   public void addDataChunkToMerge(UnsafeCarbonRowPage rowPage) {
@@ -152,6 +150,7 @@ public class UnsafeIntermediateMerger {
         UnsafeCarbonRowPage page = iter.next();
         if (!spillDisk || sizeAdded + page.getDataBlock().size() < this.spillSizeInSortMemory) {
           pages2Merge.add(page);
+          sizeAdded += page.getDataBlock().size();
           totalRows2Merge += page.getBuffer().getActualSize();
           iter.remove();
         } else {
@@ -190,14 +189,6 @@ public class UnsafeIntermediateMerger {
     mergerTask.add(executorService.submit(merger));
   }
 
-  private int getTotalNumberOfRows(List<UnsafeCarbonRowPage> unsafeCarbonRowPages) {
-    int totalSize = 0;
-    for (UnsafeCarbonRowPage unsafeCarbonRowPage : unsafeCarbonRowPages) {
-      totalSize += unsafeCarbonRowPage.getBuffer().getActualSize();
-    }
-    return totalSize;
-  }
-
   public void finish() throws CarbonSortKeyAndGroupByException {
     try {
       executorService.shutdown();
@@ -221,7 +212,7 @@ public class UnsafeIntermediateMerger {
       try {
         mergerTask.get(i).get();
       } catch (InterruptedException | ExecutionException e) {
-        LOGGER.error(e, e.getMessage());
+        LOGGER.error(e.getMessage(), e);
         throw new CarbonSortKeyAndGroupByException(e.getMessage(), e);
       }
     }

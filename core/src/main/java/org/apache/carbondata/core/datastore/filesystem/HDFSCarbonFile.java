@@ -21,22 +21,20 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
+import org.apache.log4j.Logger;
 
 public class HDFSCarbonFile extends AbstractDFSCarbonFile {
   /**
    * LOGGER
    */
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(HDFSCarbonFile.class.getName());
 
   public HDFSCarbonFile(String filePath) {
@@ -76,17 +74,6 @@ public class HDFSCarbonFile extends AbstractDFSCarbonFile {
   }
 
   @Override
-  protected List<CarbonFile> getFiles(RemoteIterator<LocatedFileStatus> listStatus)
-      throws IOException {
-    List<CarbonFile> carbonFiles = new ArrayList<>();
-    while (listStatus.hasNext()) {
-      Path filePath = listStatus.next().getPath();
-      carbonFiles.add(new HDFSCarbonFile(filePath));
-    }
-    return carbonFiles;
-  }
-
-  @Override
   public CarbonFile[] listFiles(final CarbonFileFilter fileFilter) {
     CarbonFile[] files = listFiles();
     if (files != null && files.length >= 1) {
@@ -112,19 +99,16 @@ public class HDFSCarbonFile extends AbstractDFSCarbonFile {
   }
 
   @Override
-  public boolean renameForce(String changetoName) {
+  public boolean renameForce(String changeToName) {
     FileSystem fs;
     try {
       fs = fileStatus.getPath().getFileSystem(hadoopConf);
       if (fs instanceof DistributedFileSystem) {
-        ((DistributedFileSystem) fs).rename(fileStatus.getPath(), new Path(changetoName),
+        ((DistributedFileSystem) fs).rename(fileStatus.getPath(), new Path(changeToName),
             org.apache.hadoop.fs.Options.Rename.OVERWRITE);
         return true;
-      } else if (fileStatus.getPath().toString().startsWith("s3n")) {
-        fs.delete(new Path(changetoName), true);
-        return fs.rename(fileStatus.getPath(), new Path(changetoName));
       } else {
-        return fs.rename(fileStatus.getPath(), new Path(changetoName));
+        return fs.rename(fileStatus.getPath(), new Path(changeToName));
       }
     } catch (IOException e) {
       LOGGER.error("Exception occured: " + e.getMessage());

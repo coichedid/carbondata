@@ -22,33 +22,46 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 
+import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
+import org.apache.carbondata.core.constants.SortScopeOptions;
 import org.apache.carbondata.core.datastore.TableSpec;
 import org.apache.carbondata.core.datastore.block.SegmentProperties;
 import org.apache.carbondata.core.keygenerator.KeyGenerator;
+import org.apache.carbondata.core.localdictionary.generator.LocalDictionaryGenerator;
 import org.apache.carbondata.core.metadata.AbsoluteTableIdentifier;
-import org.apache.carbondata.core.metadata.CarbonMetadata;
 import org.apache.carbondata.core.metadata.CarbonTableIdentifier;
 import org.apache.carbondata.core.metadata.datatype.DataType;
+import org.apache.carbondata.core.metadata.datatype.DataTypes;
+import org.apache.carbondata.core.metadata.encoder.Encoding;
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable;
+import org.apache.carbondata.core.metadata.schema.table.column.CarbonColumn;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonDimension;
 import org.apache.carbondata.core.metadata.schema.table.column.CarbonMeasure;
 import org.apache.carbondata.core.metadata.schema.table.column.ColumnSchema;
+import org.apache.carbondata.core.util.CarbonProperties;
 import org.apache.carbondata.core.util.CarbonUtil;
 import org.apache.carbondata.core.util.path.CarbonTablePath;
 import org.apache.carbondata.processing.datamap.DataMapWriterListener;
 import org.apache.carbondata.processing.datatypes.GenericDataType;
 import org.apache.carbondata.processing.loading.CarbonDataLoadConfiguration;
+import org.apache.carbondata.processing.loading.DataField;
 import org.apache.carbondata.processing.loading.constants.DataLoadProcessorConstants;
 import org.apache.carbondata.processing.loading.model.CarbonLoadModel;
-import org.apache.carbondata.processing.loading.sort.SortScopeOptions;
 import org.apache.carbondata.processing.util.CarbonDataProcessorUtil;
+
+import org.apache.log4j.Logger;
 
 // This class contains all the data required for processing and writing the carbon data
 // TODO: we should try to minimize this class as refactorying loading process
 public class CarbonFactDataHandlerModel {
+
+  /**
+   * LOGGER
+   */
+  private static final Logger LOGGER =
+      LogServiceFactory.getLogService(CarbonFactDataHandlerModel.class.getName());
 
   /**
    * dbName
@@ -79,10 +92,6 @@ public class CarbonFactDataHandlerModel {
    * local store location
    */
   private String[] storeLocation;
-  /**
-   * flag to check whether use inverted index
-   */
-  private boolean[] isUseInvertedIndex;
 
   /**
    * length of each dimension, including dictionary, nodictioncy, complex dimension
@@ -116,6 +125,12 @@ public class CarbonFactDataHandlerModel {
    * data type of all measures in the table
    */
   private DataType[] measureDataType;
+
+  /**
+   * no dictionary and complex columns in the table
+   */
+  private CarbonColumn[] noDictAndComplexColumns;
+
   /**
    * carbon data file attributes like task id, file stamp
    */
@@ -164,16 +179,22 @@ public class CarbonFactDataHandlerModel {
 
   private short writingCoresCount;
 
+  private Map<String, LocalDictionaryGenerator> columnLocalDictGenMap;
+
+  private int numberOfCores;
+
+  private List<Integer> varcharDimIdxInNoDict;
+
+  private String columnCompressor;
+
   /**
    * Create the model using @{@link CarbonDataLoadConfiguration}
    */
   public static CarbonFactDataHandlerModel createCarbonFactDataHandlerModel(
       CarbonDataLoadConfiguration configuration, String[] storeLocation, int bucketId,
-      int taskExtension) {
+      int taskExtension, DataMapWriterListener listener) {
     CarbonTableIdentifier identifier =
         configuration.getTableIdentifier().getCarbonTableIdentifier();
-    boolean[] isUseInvertedIndex =
-        CarbonDataProcessorUtil.getIsUseInvertedIndex(configuration.getDataFields());
 
     int[] dimLensWithComplex = configuration.getCardinalityFinder().getCardinality();
     if (!configuration.isSortTable()) {
@@ -183,8 +204,7 @@ public class CarbonFactDataHandlerModel {
         }
       }
     }
-    CarbonTable carbonTable = CarbonMetadata.getInstance().getCarbonTable(
-        identifier.getDatabaseName(), identifier.getTableName());
+    CarbonTable carbonTable = configuration.getTableSpec().getCarbonTable();
 
     List<ColumnSchema> wrapperColumnSchema = CarbonUtil
         .getColumnSchemaList(carbonTable.getDimensionByTableName(identifier.getTableName()),
@@ -199,7 +219,8 @@ public class CarbonFactDataHandlerModel {
 
     int dimensionCount = configuration.getDimensionCount();
     int noDictionaryCount = configuration.getNoDictionaryCount();
-    int complexDimensionCount = configuration.getComplexColumnCount();
+    int complexDimensionCount = configuration.getComplexDictionaryColumnCount() + configuration
+        .getComplexNonDictionaryColumnCount();
     int measureCount = configuration.getMeasureCount();
 
     int simpleDimsCount = dimensionCount - noDictionaryCount - complexDimensionCount;
@@ -207,11 +228,25 @@ public class CarbonFactDataHandlerModel {
     for (int i = 0; i < simpleDimsCount; i++) {
       simpleDimsLen[i] = dimLens[i];
     }
+
+    int noDictionayDimensionIndex = 0;
+    // for dynamic page size in write step if varchar columns exist
+    List<Integer> varcharDimIdxInNoDict = new ArrayList<>();
+    for (DataField dataField : configuration.getDataFields()) {
+      CarbonColumn column = dataField.getColumn();
+      if (!dataField.hasDictionaryEncoding()) {
+        if (!column.isComplex() && column.getDataType() == DataTypes.VARCHAR) {
+          varcharDimIdxInNoDict.add(noDictionayDimensionIndex);
+        }
+        noDictionayDimensionIndex++;
+      }
+    }
+
     //To Set MDKey Index of each primitive type in complex type
     int surrIndex = simpleDimsCount;
     Iterator<Map.Entry<String, GenericDataType>> complexMap =
-        CarbonDataProcessorUtil.getComplexTypesMap(configuration.getDataFields()).entrySet()
-            .iterator();
+        CarbonDataProcessorUtil.getComplexTypesMap(configuration.getDataFields(), configuration)
+            .entrySet().iterator();
     Map<Integer, GenericDataType> complexIndexMap = new HashMap<>(complexDimensionCount);
     while (complexMap.hasNext()) {
       Map.Entry<String, GenericDataType> complexDataType = complexMap.next();
@@ -221,7 +256,9 @@ public class CarbonFactDataHandlerModel {
       List<GenericDataType> primitiveTypes = new ArrayList<GenericDataType>();
       complexDataType.getValue().getAllPrimitiveChildren(primitiveTypes);
       for (GenericDataType eachPrimitive : primitiveTypes) {
-        eachPrimitive.setSurrogateIndex(surrIndex++);
+        if (eachPrimitive.getIsColumnDictionary()) {
+          eachPrimitive.setSurrogateIndex(surrIndex++);
+        }
       }
     }
 
@@ -232,10 +269,8 @@ public class CarbonFactDataHandlerModel {
 
     CarbonFactDataHandlerModel carbonFactDataHandlerModel = new CarbonFactDataHandlerModel();
     carbonFactDataHandlerModel.setSchemaUpdatedTimeStamp(configuration.getSchemaUpdatedTimeStamp());
-    carbonFactDataHandlerModel.setDatabaseName(
-        identifier.getDatabaseName());
-    carbonFactDataHandlerModel
-        .setTableName(identifier.getTableName());
+    carbonFactDataHandlerModel.setDatabaseName(identifier.getDatabaseName());
+    carbonFactDataHandlerModel.setTableName(identifier.getTableName());
     carbonFactDataHandlerModel.setMeasureCount(measureCount);
     carbonFactDataHandlerModel.setStoreLocation(storeLocation);
     carbonFactDataHandlerModel.setDimLens(dimLens);
@@ -246,11 +281,12 @@ public class CarbonFactDataHandlerModel {
     carbonFactDataHandlerModel.setSegmentProperties(segmentProperties);
     carbonFactDataHandlerModel.setColCardinality(colCardinality);
     carbonFactDataHandlerModel.setMeasureDataType(configuration.getMeasureDataType());
+    carbonFactDataHandlerModel
+        .setNoDictAndComplexColumns(configuration.getNoDictAndComplexDimensions());
     carbonFactDataHandlerModel.setWrapperColumnSchema(wrapperColumnSchema);
     carbonFactDataHandlerModel.setPrimitiveDimLens(simpleDimsLen);
     carbonFactDataHandlerModel.setCarbonDataFileAttributes(carbonDataFileAttributes);
     carbonFactDataHandlerModel.setCarbonDataDirectoryPath(carbonDataDirectoryPath);
-    carbonFactDataHandlerModel.setIsUseInvertedIndex(isUseInvertedIndex);
     carbonFactDataHandlerModel.setBlockSizeInMB(carbonTable.getBlockSizeInMB());
     carbonFactDataHandlerModel.setComplexDimensionKeyGenerator(
         configuration.createKeyGeneratorForComplexDimension());
@@ -259,13 +295,25 @@ public class CarbonFactDataHandlerModel {
     carbonFactDataHandlerModel.taskExtension = taskExtension;
     carbonFactDataHandlerModel.tableSpec = configuration.getTableSpec();
     carbonFactDataHandlerModel.sortScope = CarbonDataProcessorUtil.getSortScope(configuration);
+    carbonFactDataHandlerModel.columnCompressor = configuration.getColumnCompressor();
 
-    DataMapWriterListener listener = new DataMapWriterListener();
-    listener.registerAllWriter(configuration.getTableSpec().getCarbonTable(),
-        configuration.getSegmentId(), storeLocation[new Random().nextInt(storeLocation.length)]);
+    if (listener == null) {
+      listener = new DataMapWriterListener();
+      listener.registerAllWriter(
+          configuration.getTableSpec().getCarbonTable(),
+          configuration.getSegmentId(),
+          CarbonTablePath.getShardName(
+              carbonDataFileAttributes.getTaskId(),
+              bucketId,
+              0,
+              String.valueOf(carbonDataFileAttributes.getFactTimeStamp()),
+              configuration.getSegmentId()),
+          segmentProperties);
+    }
     carbonFactDataHandlerModel.dataMapWriterlistener = listener;
     carbonFactDataHandlerModel.writingCoresCount = configuration.getWritingCoresCount();
-
+    carbonFactDataHandlerModel.initNumberOfCores();
+    carbonFactDataHandlerModel.setVarcharDimIdxInNoDict(varcharDimIdxInNoDict);
     return carbonFactDataHandlerModel;
   }
 
@@ -278,6 +326,28 @@ public class CarbonFactDataHandlerModel {
   public static CarbonFactDataHandlerModel getCarbonFactDataHandlerModel(CarbonLoadModel loadModel,
       CarbonTable carbonTable, SegmentProperties segmentProperties, String tableName,
       String[] tempStoreLocation, String carbonDataDirectoryPath) {
+
+    // for dynamic page size in write step if varchar columns exist
+    List<Integer> varcharDimIdxInNoDict = new ArrayList<>();
+    List<CarbonDimension> allDimensions = carbonTable.getDimensions();
+    int dictDimCount = allDimensions.size() - segmentProperties.getNumberOfNoDictionaryDimension()
+            - segmentProperties.getComplexDimensions().size();
+    CarbonColumn[] noDicAndComplexColumns =
+        new CarbonColumn[segmentProperties.getNumberOfNoDictionaryDimension() + segmentProperties
+            .getComplexDimensions().size()];
+    int noDicAndComp = 0;
+    for (CarbonDimension dim : allDimensions) {
+      if (!dim.isComplex() && !dim.hasEncoding(Encoding.DICTIONARY) &&
+          dim.getDataType() == DataTypes.VARCHAR) {
+        // ordinal is set in CarbonTable.fillDimensionsAndMeasuresForTables()
+        varcharDimIdxInNoDict.add(dim.getOrdinal() - dictDimCount);
+      }
+      if (!dim.hasEncoding(Encoding.DICTIONARY)) {
+        noDicAndComplexColumns[noDicAndComp++] =
+            new CarbonColumn(dim.getColumnSchema(), dim.getOrdinal(), dim.getSchemaOrdinal());
+      }
+    }
+
     CarbonFactDataHandlerModel carbonFactDataHandlerModel = new CarbonFactDataHandlerModel();
     carbonFactDataHandlerModel.setSchemaUpdatedTimeStamp(carbonTable.getTableLastUpdatedTime());
     carbonFactDataHandlerModel.setDatabaseName(loadModel.getDatabaseName());
@@ -286,6 +356,7 @@ public class CarbonFactDataHandlerModel {
     carbonFactDataHandlerModel.setStoreLocation(tempStoreLocation);
     carbonFactDataHandlerModel.setDimLens(segmentProperties.getDimColumnsCardinality());
     carbonFactDataHandlerModel.setSegmentProperties(segmentProperties);
+    carbonFactDataHandlerModel.setSegmentId(loadModel.getSegmentId());
     carbonFactDataHandlerModel
         .setNoDictionaryCount(segmentProperties.getNumberOfNoDictionaryDimension());
     carbonFactDataHandlerModel.setDimensionCount(
@@ -309,26 +380,30 @@ public class CarbonFactDataHandlerModel {
       measureDataTypes[i++] = msr.getDataType();
     }
     carbonFactDataHandlerModel.setMeasureDataType(measureDataTypes);
+    carbonFactDataHandlerModel.setNoDictAndComplexColumns(noDicAndComplexColumns);
     CarbonUtil.checkAndCreateFolderWithPermission(carbonDataDirectoryPath);
     carbonFactDataHandlerModel.setCarbonDataDirectoryPath(carbonDataDirectoryPath);
-    List<CarbonDimension> dimensionByTableName = carbonTable.getDimensionByTableName(tableName);
-    boolean[] isUseInvertedIndexes = new boolean[dimensionByTableName.size()];
-    int index = 0;
-    for (CarbonDimension dimension : dimensionByTableName) {
-      isUseInvertedIndexes[index++] = dimension.isUseInvertedIndex();
-    }
-    carbonFactDataHandlerModel.setIsUseInvertedIndex(isUseInvertedIndexes);
     carbonFactDataHandlerModel.setPrimitiveDimLens(segmentProperties.getDimColumnsCardinality());
     carbonFactDataHandlerModel.setBlockSizeInMB(carbonTable.getBlockSizeInMB());
+    carbonFactDataHandlerModel.setColumnCompressor(loadModel.getColumnCompressor());
 
-    carbonFactDataHandlerModel.tableSpec =
-        new TableSpec(loadModel.getCarbonDataLoadSchema().getCarbonTable());
+    carbonFactDataHandlerModel.tableSpec = new TableSpec(carbonTable);
     DataMapWriterListener listener = new DataMapWriterListener();
     listener.registerAllWriter(
-        loadModel.getCarbonDataLoadSchema().getCarbonTable(),
+        carbonTable,
         loadModel.getSegmentId(),
-        tempStoreLocation[new Random().nextInt(tempStoreLocation.length)]);
+        CarbonTablePath.getShardName(
+            CarbonTablePath.DataFileUtil.getTaskIdFromTaskNo(loadModel.getTaskNo()),
+            carbonFactDataHandlerModel.getBucketId(),
+            carbonFactDataHandlerModel.getTaskExtension(),
+            String.valueOf(loadModel.getFactTimeStamp()),
+            loadModel.getSegmentId()),
+        segmentProperties);
     carbonFactDataHandlerModel.dataMapWriterlistener = listener;
+    carbonFactDataHandlerModel.initNumberOfCores();
+    carbonFactDataHandlerModel
+        .setColumnLocalDictGenMap(CarbonUtil.getLocalDictionaryModel(carbonTable));
+    carbonFactDataHandlerModel.setVarcharDimIdxInNoDict(varcharDimIdxInNoDict);
     return carbonFactDataHandlerModel;
   }
 
@@ -367,7 +442,7 @@ public class CarbonFactDataHandlerModel {
     }
     AbsoluteTableIdentifier absoluteTableIdentifier = configuration.getTableIdentifier();
     String carbonDataDirectoryPath;
-    if (configuration.isCarbonUnmanagedTable()) {
+    if (!configuration.isCarbonTransactionalTable()) {
       carbonDataDirectoryPath = absoluteTableIdentifier.getTablePath();
     } else {
       carbonDataDirectoryPath = CarbonTablePath
@@ -495,15 +570,9 @@ public class CarbonFactDataHandlerModel {
    */
   public void setCompactionFlow(boolean compactionFlow) {
     isCompactionFlow = compactionFlow;
+    initNumberOfCores();
   }
 
-  public boolean[] getIsUseInvertedIndex() {
-    return isUseInvertedIndex;
-  }
-
-  public void setIsUseInvertedIndex(boolean[] isUseInvertedIndex) {
-    this.isUseInvertedIndex = isUseInvertedIndex;
-  }
   /**
    *
    * @return segmentProperties
@@ -590,10 +659,6 @@ public class CarbonFactDataHandlerModel {
     return count;
   }
 
-  public boolean isSortColumn(int columnIndex) {
-    return columnIndex < segmentProperties.getNumberOfSortColumns();
-  }
-
   public TableSpec getTableSpec() {
     return tableSpec;
   }
@@ -608,6 +673,61 @@ public class CarbonFactDataHandlerModel {
 
   public DataMapWriterListener getDataMapWriterlistener() {
     return dataMapWriterlistener;
+  }
+
+  public Map<String, LocalDictionaryGenerator> getColumnLocalDictGenMap() {
+    return columnLocalDictGenMap;
+  }
+
+  public void setColumnLocalDictGenMap(
+      Map<String, LocalDictionaryGenerator> columnLocalDictGenMap) {
+    this.columnLocalDictGenMap = columnLocalDictGenMap;
+  }
+
+  private void initNumberOfCores() {
+    // in compaction flow the measure with decimal type will come as spark decimal.
+    // need to convert it to byte array.
+    if (this.isCompactionFlow()) {
+      this.numberOfCores = CarbonProperties.getInstance().getNumberOfCompactingCores();
+    } else {
+      this.numberOfCores = CarbonProperties.getInstance().getNumberOfLoadingCores();
+    }
+
+    if (this.sortScope != null && this.sortScope.equals(SortScopeOptions.SortScope.GLOBAL_SORT)) {
+      this.numberOfCores = 1;
+    }
+    // Overriding it to the task specified cores.
+    if (this.getWritingCoresCount() > 0) {
+      this.numberOfCores = this.getWritingCoresCount();
+    }
+  }
+
+  public int getNumberOfCores() {
+    return numberOfCores;
+  }
+
+  public void setVarcharDimIdxInNoDict(List<Integer> varcharDimIdxInNoDict) {
+    this.varcharDimIdxInNoDict = varcharDimIdxInNoDict;
+  }
+
+  public List<Integer> getVarcharDimIdxInNoDict() {
+    return varcharDimIdxInNoDict;
+  }
+
+  public String getColumnCompressor() {
+    return columnCompressor;
+  }
+
+  public void setColumnCompressor(String columnCompressor) {
+    this.columnCompressor = columnCompressor;
+  }
+
+  public CarbonColumn[] getNoDictAndComplexColumns() {
+    return noDictAndComplexColumns;
+  }
+
+  public void setNoDictAndComplexColumns(CarbonColumn[] noDictAndComplexColumns) {
+    this.noDictAndComplexColumns = noDictAndComplexColumns;
   }
 }
 

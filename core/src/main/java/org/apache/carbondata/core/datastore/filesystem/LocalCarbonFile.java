@@ -36,12 +36,13 @@ import java.util.List;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.constants.CarbonCommonConstants;
 import org.apache.carbondata.core.datastore.impl.FileFactory;
 import org.apache.carbondata.core.util.CarbonUtil;
 
+import com.github.luben.zstd.ZstdInputStream;
+import com.github.luben.zstd.ZstdOutputStream;
 import net.jpountz.lz4.LZ4BlockInputStream;
 import net.jpountz.lz4.LZ4BlockOutputStream;
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream;
@@ -49,12 +50,14 @@ import org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.log4j.Logger;
 import org.xerial.snappy.SnappyInputStream;
 import org.xerial.snappy.SnappyOutputStream;
 
 public class LocalCarbonFile implements CarbonFile {
-  private static final LogService LOGGER =
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(LocalCarbonFile.class.getName());
   private File file;
 
@@ -115,8 +118,7 @@ public class LocalCarbonFile implements CarbonFile {
     try {
       return file.getCanonicalPath();
     } catch (IOException e) {
-      LOGGER
-          .error(e, "Exception occured" + e.getMessage());
+      LOGGER.error("Exception occured" + e.getMessage(), e);
     }
     return null;
   }
@@ -133,13 +135,18 @@ public class LocalCarbonFile implements CarbonFile {
     return file.length();
   }
 
-  public boolean renameTo(String changetoName) {
-    changetoName = FileFactory.getUpdatedFilePath(changetoName, FileFactory.FileType.LOCAL);
-    return file.renameTo(new File(changetoName));
+  public boolean renameTo(String changeToName) {
+    changeToName = FileFactory.getUpdatedFilePath(changeToName, FileFactory.FileType.LOCAL);
+    return file.renameTo(new File(changeToName));
   }
 
   public boolean delete() {
-    return file.delete();
+    try {
+      return deleteFile(file.getAbsolutePath(), FileFactory.getFileType(file.getAbsolutePath()));
+    } catch (IOException e) {
+      LOGGER.error("Exception occurred:" + e.getMessage(), e);
+      return false;
+    }
   }
 
   @Override public CarbonFile[] listFiles() {
@@ -172,6 +179,25 @@ public class LocalCarbonFile implements CarbonFile {
     List<CarbonFile> carbonFiles = new ArrayList<CarbonFile>();
     for (File file : fileCollection) {
       carbonFiles.add(new LocalCarbonFile(file));
+    }
+    return carbonFiles;
+  }
+
+  @Override public List<CarbonFile> listFiles(boolean recursive, CarbonFileFilter fileFilter)
+      throws IOException {
+    if (!file.isDirectory()) {
+      return new ArrayList<CarbonFile>();
+    }
+    Collection<File> fileCollection = FileUtils.listFiles(file, null, recursive);
+    if (fileCollection == null) {
+      return new ArrayList<CarbonFile>();
+    }
+    List<CarbonFile> carbonFiles = new ArrayList<CarbonFile>();
+    for (File file : fileCollection) {
+      CarbonFile carbonFile = new LocalCarbonFile(file);
+      if (fileFilter.accept(carbonFile)) {
+        carbonFiles.add(carbonFile);
+      }
     }
     return carbonFiles;
   }
@@ -251,14 +277,14 @@ public class LocalCarbonFile implements CarbonFile {
   }
 
 
-  @Override public boolean renameForce(String changetoName) {
-    File destFile = new File(changetoName);
+  @Override public boolean renameForce(String changeToName) {
+    File destFile = new File(changeToName);
     if (destFile.exists() && !file.getAbsolutePath().equals(destFile.getAbsolutePath())) {
       if (destFile.delete()) {
-        return file.renameTo(new File(changetoName));
+        return file.renameTo(new File(changeToName));
       }
     }
-    return file.renameTo(new File(changetoName));
+    return file.renameTo(new File(changeToName));
   }
 
   @Override public DataOutputStream getDataOutputStream(String path, FileFactory.FileType fileType,
@@ -289,6 +315,8 @@ public class LocalCarbonFile implements CarbonFile {
       inputStream = new SnappyInputStream(new FileInputStream(path));
     } else if ("LZ4".equalsIgnoreCase(compressor)) {
       inputStream = new LZ4BlockInputStream(new FileInputStream(path));
+    } else if ("ZSTD".equalsIgnoreCase(compressor)) {
+      inputStream = new ZstdInputStream(new FileInputStream(path));
     } else {
       throw new IOException("Unsupported compressor: " + compressor);
     }
@@ -367,6 +395,10 @@ public class LocalCarbonFile implements CarbonFile {
       outputStream = new SnappyOutputStream(new FileOutputStream(path));
     } else if ("LZ4".equalsIgnoreCase(compressor)) {
       outputStream = new LZ4BlockOutputStream(new FileOutputStream(path));
+    } else if ("ZSTD".equalsIgnoreCase(compressor)) {
+      // compression level 1 is cost-effective for sort temp file
+      // which is not used for storage
+      outputStream = new ZstdOutputStream(new FileOutputStream(path), 1);
     } else {
       throw new IOException("Unsupported compressor: " + compressor);
     }
@@ -424,10 +456,10 @@ public class LocalCarbonFile implements CarbonFile {
     return FileFactory.deleteAllFilesOfDir(file);
   }
 
-  @Override public boolean mkdirs(String filePath, FileFactory.FileType fileType)
+  @Override public boolean mkdirs(String filePath)
       throws IOException {
     filePath = filePath.replace("\\", "/");
-    filePath = FileFactory.getUpdatedFilePath(filePath, fileType);
+    filePath = FileFactory.getUpdatedFilePath(filePath);
     File file = new File(filePath);
     return file.mkdirs();
   }
@@ -448,7 +480,7 @@ public class LocalCarbonFile implements CarbonFile {
     return file.createNewFile();
   }
 
-  @Override public CarbonFile[] locationAwareListFiles() throws IOException {
+  @Override public CarbonFile[] locationAwareListFiles(PathFilter pathFilter) throws IOException {
     return listFiles();
   }
 
@@ -465,5 +497,9 @@ public class LocalCarbonFile implements CarbonFile {
   @Override
   public short getDefaultReplication(String filePath) throws IOException {
     return 1;
+  }
+
+  @Override public long getLength() {
+    return file.length();
   }
 }

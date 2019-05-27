@@ -17,6 +17,7 @@
 
 package org.apache.carbondata.core.datastore.page;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 
 import org.apache.carbondata.core.metadata.datatype.DataType;
@@ -36,7 +37,7 @@ public class LazyColumnPage extends ColumnPage {
   private ColumnPageValueConverter converter;
 
   private LazyColumnPage(ColumnPage columnPage, ColumnPageValueConverter converter) {
-    super(columnPage.getColumnSpec(), columnPage.getDataType(), columnPage.getPageSize());
+    super(columnPage.getColumnPageEncoderMeta(), columnPage.getPageSize());
     this.columnPage = columnPage;
     this.converter = converter;
   }
@@ -92,7 +93,7 @@ public class LazyColumnPage extends ColumnPage {
 
   @Override
   public float getFloat(int rowId) {
-    throw new UnsupportedOperationException("internal error");
+    return (float) getDouble(rowId);
   }
 
   @Override
@@ -171,7 +172,17 @@ public class LazyColumnPage extends ColumnPage {
   }
 
   @Override
-  public byte[] getLVFlattenedBytePage() {
+  public byte[] getLVFlattenedBytePage() throws IOException {
+    throw new UnsupportedOperationException("internal error");
+  }
+
+  @Override
+  public byte[] getComplexChildrenLVFlattenedBytePage() {
+    throw new UnsupportedOperationException("internal error");
+  }
+
+  @Override
+  public byte[] getComplexParentFlattenedBytePage() throws IOException {
     throw new UnsupportedOperationException("internal error");
   }
 
@@ -247,6 +258,11 @@ public class LazyColumnPage extends ColumnPage {
 
   @Override
   public void putDouble(int rowId, double value) {
+    throw new UnsupportedOperationException("internal error");
+  }
+
+  @Override
+  public void putFloat(int rowId, float value) {
     throw new UnsupportedOperationException("internal error");
   }
 

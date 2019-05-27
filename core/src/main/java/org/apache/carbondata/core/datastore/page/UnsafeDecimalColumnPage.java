@@ -19,11 +19,10 @@ package org.apache.carbondata.core.datastore.page;
 
 import java.math.BigDecimal;
 
-import org.apache.carbondata.core.datastore.TableSpec;
+import org.apache.carbondata.core.datastore.page.encoding.ColumnPageEncoderMeta;
 import org.apache.carbondata.core.memory.CarbonUnsafe;
 import org.apache.carbondata.core.memory.MemoryException;
 import org.apache.carbondata.core.memory.UnsafeMemoryManager;
-import org.apache.carbondata.core.metadata.datatype.DataType;
 import org.apache.carbondata.core.metadata.datatype.DataTypes;
 import org.apache.carbondata.core.util.ByteUtil;
 
@@ -32,36 +31,35 @@ import org.apache.carbondata.core.util.ByteUtil;
  */
 public class UnsafeDecimalColumnPage extends DecimalColumnPage {
 
-  UnsafeDecimalColumnPage(TableSpec.ColumnSpec columnSpec, DataType dataType, int pageSize)
+  UnsafeDecimalColumnPage(ColumnPageEncoderMeta columnPageEncoderMeta, int pageSize)
       throws MemoryException {
-    super(columnSpec, dataType, pageSize);
-    capacity = (int) (pageSize * DEFAULT_ROW_SIZE * FACTOR);
-    initMemory();
+    this(columnPageEncoderMeta, pageSize, (int) (pageSize * DEFAULT_ROW_SIZE * FACTOR));
   }
 
-  UnsafeDecimalColumnPage(TableSpec.ColumnSpec columnSpec, DataType dataType, int pageSize,
-      int capacity) throws MemoryException {
-    super(columnSpec, dataType, pageSize);
+  UnsafeDecimalColumnPage(ColumnPageEncoderMeta columnPageEncoderMeta, int pageSize, int capacity)
+      throws MemoryException {
+    super(columnPageEncoderMeta, pageSize);
     this.capacity = capacity;
     initMemory();
   }
 
   private void initMemory() throws MemoryException {
-    if (dataType == DataTypes.BYTE ||
-        dataType == DataTypes.SHORT ||
-        dataType == DataTypes.INT ||
-        dataType == DataTypes.LONG) {
-      int size = pageSize << dataType.getSizeBits();
+    if (columnPageEncoderMeta.getStoreDataType() == DataTypes.BYTE ||
+        columnPageEncoderMeta.getStoreDataType() == DataTypes.SHORT ||
+        columnPageEncoderMeta.getStoreDataType() == DataTypes.INT ||
+        columnPageEncoderMeta.getStoreDataType() == DataTypes.LONG) {
+      int size = pageSize << columnPageEncoderMeta.getStoreDataType().getSizeBits();
       memoryBlock = UnsafeMemoryManager.allocateMemoryWithRetry(taskId, size);
-    } else if (dataType == DataTypes.SHORT_INT) {
+    } else if (columnPageEncoderMeta.getStoreDataType() == DataTypes.SHORT_INT) {
       int size = pageSize * 3;
       memoryBlock = UnsafeMemoryManager.allocateMemoryWithRetry(taskId, size);
-    } else if (DataTypes.isDecimal(dataType)) {
+    } else if (DataTypes.isDecimal(columnPageEncoderMeta.getStoreDataType())) {
       memoryBlock = UnsafeMemoryManager.allocateMemoryWithRetry(taskId, (long) (capacity));
-    } else if (dataType == DataTypes.BYTE_ARRAY) {
+    } else if (columnPageEncoderMeta.getStoreDataType() == DataTypes.BYTE_ARRAY) {
       memoryBlock = UnsafeMemoryManager.allocateMemoryWithRetry(taskId, (long) (capacity));
     } else {
-      throw new UnsupportedOperationException("invalid data type: " + dataType);
+      throw new UnsupportedOperationException(
+          "invalid data type: " + columnPageEncoderMeta.getStoreDataType());
     }
     baseAddress = memoryBlock.getBaseObject();
     baseOffset = memoryBlock.getBaseOffset();
@@ -119,18 +117,19 @@ public class UnsafeDecimalColumnPage extends DecimalColumnPage {
       memoryBlock = null;
       baseAddress = null;
       baseOffset = 0;
+      super.freeMemory();
     }
   }
 
   @Override
   public void putByte(int rowId, byte value) {
-    long offset = rowId << byteBits;
+    long offset = (long)rowId << byteBits;
     CarbonUnsafe.getUnsafe().putByte(baseAddress, baseOffset + offset, value);
   }
 
   @Override
   public void putShort(int rowId, short value) {
-    long offset = rowId << shortBits;
+    long offset = (long)rowId << shortBits;
     CarbonUnsafe.getUnsafe().putShort(baseAddress, baseOffset + offset, value);
   }
 
@@ -145,13 +144,13 @@ public class UnsafeDecimalColumnPage extends DecimalColumnPage {
 
   @Override
   public void putInt(int rowId, int value) {
-    long offset = rowId << intBits;
+    long offset = (long)rowId << intBits;
     CarbonUnsafe.getUnsafe().putInt(baseAddress, baseOffset + offset, value);
   }
 
   @Override
   public void putLong(int rowId, long value) {
-    long offset = rowId << longBits;
+    long offset = (long)rowId << longBits;
     CarbonUnsafe.getUnsafe().putLong(baseAddress, baseOffset + offset, value);
   }
 
@@ -168,7 +167,7 @@ public class UnsafeDecimalColumnPage extends DecimalColumnPage {
       throw new RuntimeException(e);
     }
     CarbonUnsafe.getUnsafe().copyMemory(bytes, CarbonUnsafe.BYTE_ARRAY_OFFSET + offset, baseAddress,
-        baseOffset + rowOffset[rowId], length);
+        baseOffset + rowOffset.getInt(rowId), length);
   }
 
   @Override
@@ -187,22 +186,22 @@ public class UnsafeDecimalColumnPage extends DecimalColumnPage {
 
   @Override
   public byte getByte(int rowId) {
-    long offset = rowId << byteBits;
+    long offset = (long)rowId << byteBits;
     return CarbonUnsafe.getUnsafe().getByte(baseAddress, baseOffset + offset);
   }
 
   @Override
   public byte[] getBytes(int rowId) {
-    int length = rowOffset[rowId + 1] - rowOffset[rowId];
+    int length = rowOffset.getInt(rowId + 1) - rowOffset.getInt(rowId);
     byte[] bytes = new byte[length];
-    CarbonUnsafe.getUnsafe().copyMemory(baseAddress, baseOffset + rowOffset[rowId],
+    CarbonUnsafe.getUnsafe().copyMemory(baseAddress, baseOffset + rowOffset.getInt(rowId),
         bytes, CarbonUnsafe.BYTE_ARRAY_OFFSET, length);
     return bytes;
   }
 
   @Override
   public short getShort(int rowId) {
-    long offset = rowId << shortBits;
+    long offset = (long) rowId << shortBits;
     return CarbonUnsafe.getUnsafe().getShort(baseAddress, baseOffset + offset);
   }
 
@@ -218,42 +217,19 @@ public class UnsafeDecimalColumnPage extends DecimalColumnPage {
 
   @Override
   public int getInt(int rowId) {
-    long offset = rowId << intBits;
+    long offset = (long)rowId << intBits;
     return CarbonUnsafe.getUnsafe().getInt(baseAddress, baseOffset + offset);
   }
 
   @Override
   public long getLong(int rowId) {
-    long offset = rowId << longBits;
+    long offset = (long) rowId << longBits;
     return CarbonUnsafe.getUnsafe().getLong(baseAddress, baseOffset + offset);
   }
 
   @Override
-  public BigDecimal getDecimal(int rowId) {
-    long value;
-    if (dataType == DataTypes.BYTE) {
-      value = getByte(rowId);
-    } else if (dataType == DataTypes.SHORT) {
-      value = getShort(rowId);
-    } else if (dataType == DataTypes.SHORT_INT) {
-      value = getShortInt(rowId);
-    } else if (dataType == DataTypes.INT) {
-      value = getInt(rowId);
-    } else if (dataType == DataTypes.LONG) {
-      value = getLong(rowId);
-    } else {
-      int length = rowOffset[rowId + 1] - rowOffset[rowId];
-      byte[] bytes = new byte[length];
-      CarbonUnsafe.getUnsafe().copyMemory(baseAddress, baseOffset + rowOffset[rowId], bytes,
-          CarbonUnsafe.BYTE_ARRAY_OFFSET, length);
-      return decimalConverter.getDecimal(bytes);
-    }
-    return decimalConverter.getDecimal(value);
-  }
-
-  @Override
   void copyBytes(int rowId, byte[] dest, int destOffset, int length) {
-    CarbonUnsafe.getUnsafe().copyMemory(baseAddress, baseOffset + rowOffset[rowId], dest,
+    CarbonUnsafe.getUnsafe().copyMemory(baseAddress, baseOffset + rowOffset.getInt(rowId), dest,
         CarbonUnsafe.BYTE_ARRAY_OFFSET + destOffset, length);
   }
 
@@ -266,19 +242,19 @@ public class UnsafeDecimalColumnPage extends DecimalColumnPage {
     switch (decimalConverter.getDecimalConverterType()) {
       case DECIMAL_INT:
         for (int i = 0; i < pageSize; i++) {
-          long offset = i << intBits;
+          long offset = (long)i << intBits;
           codec.encode(i, CarbonUnsafe.getUnsafe().getInt(baseAddress, baseOffset + offset));
         }
         break;
       case DECIMAL_LONG:
         for (int i = 0; i < pageSize; i++) {
-          long offset = i << longBits;
+          long offset = (long)i << longBits;
           codec.encode(i, CarbonUnsafe.getUnsafe().getLong(baseAddress, baseOffset + offset));
         }
         break;
       default:
-        throw new UnsupportedOperationException(
-            "not support value conversion on " + dataType + " page");
+        throw new UnsupportedOperationException("not support value conversion on "
+            + columnPageEncoderMeta.getStoreDataType() + " page");
     }
   }
 

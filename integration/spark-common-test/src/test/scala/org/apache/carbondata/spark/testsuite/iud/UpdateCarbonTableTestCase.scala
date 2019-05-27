@@ -26,6 +26,9 @@ import org.apache.carbondata.core.constants.{CarbonCommonConstants, CarbonLoadOp
 import org.apache.carbondata.core.util.CarbonProperties
 import org.apache.spark.sql.test.util.QueryTest
 
+import org.apache.carbondata.core.datastore.impl.FileFactory
+import org.apache.carbondata.core.util.path.CarbonTablePath
+
 class UpdateCarbonTableTestCase extends QueryTest with BeforeAndAfterAll {
   override def beforeAll {
 
@@ -43,7 +46,7 @@ class UpdateCarbonTableTestCase extends QueryTest with BeforeAndAfterAll {
     sql("""CREATE TABLE iud.update_01(imei string,age int,task bigint,num double,level decimal(10,3),name string)STORED BY 'org.apache.carbondata.format' """)
     sql(s"""LOAD DATA LOCAL INPATH '$resourcesPath/IUD/update01.csv' INTO TABLE iud.update_01 OPTIONS('BAD_RECORDS_LOGGER_ENABLE' = 'FALSE', 'BAD_RECORDS_ACTION' = 'FORCE') """)
     CarbonProperties.getInstance()
-      .addProperty(CarbonCommonConstants.isHorizontalCompactionEnabled , "true")
+      .addProperty(CarbonCommonConstants.CARBON_HORIZONTAL_COMPACTION_ENABLE , "true")
     CarbonProperties.getInstance()
       .addProperty(CarbonCommonConstants.ENABLE_VECTOR_READER , "true")
   }
@@ -454,7 +457,7 @@ class UpdateCarbonTableTestCase extends QueryTest with BeforeAndAfterAll {
 
   test("""CARBONDATA-1445 carbon.update.persist.enable=false it will fail to update data""") {
     CarbonProperties.getInstance()
-      .addProperty(CarbonCommonConstants.isPersistEnabled, "false")
+      .addProperty(CarbonCommonConstants.CARBON_UPDATE_PERSIST_ENABLE, "false")
     import sqlContext.implicits._
     val df = sqlContext.sparkContext.parallelize(0 to 50)
       .map(x => ("a", x.toString, (x % 2).toString, x, x.toLong, x * 2))
@@ -483,7 +486,7 @@ class UpdateCarbonTableTestCase extends QueryTest with BeforeAndAfterAll {
       """).show()
     assert(sql("select stringField1 from study_carbondata where stringField2 = '1_test'").collect().length == 1)
     CarbonProperties.getInstance()
-      .addProperty(CarbonCommonConstants.isPersistEnabled, "true")
+      .addProperty(CarbonCommonConstants.CARBON_UPDATE_PERSIST_ENABLE, "true")
     sql("DROP TABLE IF EXISTS study_carbondata ")
   }
 
@@ -534,15 +537,15 @@ class UpdateCarbonTableTestCase extends QueryTest with BeforeAndAfterAll {
 
   test("Update operation on carbon table with singlepass") {
     sql(s"""set ${ CarbonLoadOptionConstants.CARBON_OPTIONS_SINGLE_PASS }=true""")
-    sql("drop database if exists carbon cascade")
-    sql(s"create database carbon location '$dblocation'")
-    sql("use carbon")
+    sql("drop database if exists carbon1 cascade")
+    sql(s"create database carbon1 location '$dblocation'")
+    sql("use carbon1")
     sql("""CREATE TABLE carbontable(id int, name string, city string, age int)
          STORED BY 'org.apache.carbondata.format'""")
     val testData = s"$resourcesPath/sample.csv"
     sql(s"LOAD DATA LOCAL INPATH '$testData' into table carbontable")
     // update operation
-    sql("""update carbon.carbontable d  set (d.id) = (d.id + 1) where d.id > 2""").show()
+    sql("""update carbon1.carbontable d  set (d.id) = (d.id + 1) where d.id > 2""").show()
     checkAnswer(
       sql("select count(*) from carbontable"),
       Seq(Row(6))
@@ -552,24 +555,24 @@ class UpdateCarbonTableTestCase extends QueryTest with BeforeAndAfterAll {
   }
   test("Update operation on carbon table with persist false") {
     CarbonProperties.getInstance()
-      .addProperty(CarbonCommonConstants.isPersistEnabled, "false")
-    sql("drop database if exists carbon cascade")
-    sql(s"create database carbon location '$dblocation'")
-    sql("use carbon")
+      .addProperty(CarbonCommonConstants.CARBON_UPDATE_PERSIST_ENABLE, "false")
+    sql("drop database if exists carbon1 cascade")
+    sql(s"create database carbon1 location '$dblocation'")
+    sql("use carbon1")
     sql("""CREATE TABLE carbontable(id int, name string, city string, age int)
          STORED BY 'org.apache.carbondata.format'""")
     val testData = s"$resourcesPath/sample.csv"
     sql(s"LOAD DATA LOCAL INPATH '$testData' into table carbontable")
     // update operation
-    sql("""update carbon.carbontable d  set (d.id) = (d.id + 1) where d.id > 2""").show()
+    sql("""update carbon1.carbontable d  set (d.id) = (d.id + 1) where d.id > 2""").show()
     checkAnswer(
       sql("select count(*) from carbontable"),
       Seq(Row(6))
     )
     sql("drop table carbontable")
     CarbonProperties.getInstance()
-      .addProperty(CarbonCommonConstants.isPersistEnabled,
-        CarbonCommonConstants.defaultValueIsPersistEnabled)
+      .addProperty(CarbonCommonConstants.CARBON_UPDATE_PERSIST_ENABLE,
+        CarbonCommonConstants.CARBON_UPDATE_PERSIST_ENABLE_DEFAULT)
   }
 
   test("partition test update operation with 0 rows updation.") {
@@ -689,7 +692,12 @@ class UpdateCarbonTableTestCase extends QueryTest with BeforeAndAfterAll {
                      CarbonCommonConstants.FILE_SEPARATOR + "t" +
                      CarbonCommonConstants.FILE_SEPARATOR + "Fact" +
                      CarbonCommonConstants.FILE_SEPARATOR + "Part0")
-    assert(f.list().length == 2)
+    if (!FileFactory.isFileExist(
+      CarbonTablePath.getSegmentFilesLocation(
+        dblocation + CarbonCommonConstants.FILE_SEPARATOR +
+        CarbonCommonConstants.FILE_SEPARATOR + "t"))) {
+      assert(f.list().length == 2)
+    }
   }
   test("test sentences func in update statement") {
     sql("drop table if exists senten")
@@ -705,11 +713,85 @@ class UpdateCarbonTableTestCase extends QueryTest with BeforeAndAfterAll {
     sql("drop table if exists senten")
   }
 
-  override def afterAll {
+  test("block updating table which has preaggreate datamap") {
+    sql("use iud")
+    sql("drop table if exists test_dm_main")
+    sql("drop table if exists test_dm_main_preagg1")
+
+    sql("create table test_dm_main (a string, b string, c string) stored by 'carbondata'")
+    sql("insert into test_dm_main select 'aaa','bbb','ccc'")
+    sql("insert into test_dm_main select 'bbb','bbb','ccc'")
+    sql("insert into test_dm_main select 'ccc','bbb','ccc'")
+
+    sql(
+      "create datamap preagg1 on table test_dm_main using 'preaggregate' as select" +
+      " a,sum(b) from test_dm_main group by a")
+
+    assert(intercept[UnsupportedOperationException] {
+      sql("update test_dm_main_preagg1 set(test_dm_main_a) = ('aaa') where test_dm_main_a = 'bbb'")
+    }.getMessage.contains("Update operation is not supported for pre-aggregate table"))
+    assert(intercept[UnsupportedOperationException] {
+      sql("update test_dm_main set(a) = ('aaa') where a = 'ccc'")
+    }.getMessage.contains("Update operation is not supported for tables which have a pre-aggregate table"))
+
+    sql("drop table if exists test_dm_main")
+    sql("drop table if exists test_dm_main_preagg1")
+  }
+
+  test("block updating table which has index datamap") {
+    sql("use iud")
+    sql("drop table if exists test_dm_index")
+
+    sql("create table test_dm_index (a string, b string, c string) stored by 'carbondata'")
+    sql("insert into test_dm_index select 'ccc','bbb','ccc'")
+
+    sql(
+      s"""
+         | CREATE DATAMAP dm_test_dm_index ON TABLE test_dm_index
+         | USING 'bloomfilter'
+         | DMProperties('INDEX_COLUMNS'='a', 'BLOOM_SIZE'='640000')
+      """.stripMargin)
+
+    assert(intercept[UnsupportedOperationException] {
+      sql("update test_dm_index set(a) = ('aaa') where a = 'ccc'")
+    }.getMessage.contains("Update operation is not supported for table which has index datamaps"))
+
+    sql("drop table if exists test_dm_index")
+  }
+
+  test("flat folder carbon table without alias in set columns with mulitple loads") {
+    sql("""drop table if exists iud.dest33_flat""")
+    sql("""create table iud.dest33_part (c1 string,c2 int,c5 string, c3 string) STORED BY 'org.apache.carbondata.format' TBLPROPERTIES('flat_folder'='true')""")
+    sql(s"""LOAD DATA LOCAL INPATH '$resourcesPath/IUD/dest.csv' INTO table iud.dest33_part""")
+    sql(s"""LOAD DATA LOCAL INPATH '$resourcesPath/IUD/dest.csv' INTO table iud.dest33_part""")
+    sql("""update iud.dest33_part d set (c3,c5 ) = (select s.c33 ,s.c55  from iud.source2 s where d.c1 = s.c11) where d.c1 = 'a'""").show()
+    checkAnswer(
+      sql("""select c3,c5 from iud.dest33_part where c1='a'"""),
+      Seq(Row("MGM","Disco"),Row("MGM","Disco"))
+    )
+    sql("""drop table if exists iud.dest33_part""")
+  }
+
+  test("check data after update with row.filter pushdown as false") {
+    sql("""drop table if exists iud.dest33_flat""")
+    sql(
+      """create table iud.dest33_part (c1 int,c2 string, c3 short) STORED BY 'carbondata'"""
+        .stripMargin)
+    sql(
+      s"""LOAD DATA LOCAL INPATH '$resourcesPath/IUD/negativevalue.csv' INTO table iud
+         |.dest33_part options('header'='false')""".stripMargin)
+    sql(
+      """update iud.dest33_part d set (c1) = (5) where d.c1 = 0""".stripMargin).show()
+    checkAnswer(sql("select c3 from iud.dest33_part"), Seq(Row(-300), Row(0), Row(-200), Row(700)
+      , Row(100), Row(-100), Row(null)))
+    sql("""drop table if exists iud.dest33_part""")
+  }
+
+    override def afterAll {
     sql("use default")
     sql("drop database  if exists iud cascade")
     CarbonProperties.getInstance()
-      .addProperty(CarbonCommonConstants.isHorizontalCompactionEnabled , "true")
+      .addProperty(CarbonCommonConstants.CARBON_HORIZONTAL_COMPACTION_ENABLE , "true")
     CarbonProperties.getInstance()
       .addProperty(CarbonCommonConstants.ENABLE_VECTOR_READER , "true")
   }

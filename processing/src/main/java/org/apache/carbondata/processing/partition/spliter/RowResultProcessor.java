@@ -18,27 +18,30 @@ package org.apache.carbondata.processing.partition.spliter;
 
 import java.util.List;
 
-import org.apache.carbondata.common.logging.LogService;
 import org.apache.carbondata.common.logging.LogServiceFactory;
 import org.apache.carbondata.core.datastore.block.SegmentProperties;
 import org.apache.carbondata.core.datastore.exception.CarbonDataWriterException;
 import org.apache.carbondata.core.datastore.row.CarbonRow;
 import org.apache.carbondata.core.datastore.row.WriteStepRowUtil;
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable;
+import org.apache.carbondata.core.metadata.schema.table.column.CarbonColumn;
 import org.apache.carbondata.processing.loading.model.CarbonLoadModel;
-import org.apache.carbondata.processing.partition.spliter.exception.AlterPartitionSliceException;
 import org.apache.carbondata.processing.store.CarbonDataFileAttributes;
 import org.apache.carbondata.processing.store.CarbonFactDataHandlerColumnar;
 import org.apache.carbondata.processing.store.CarbonFactDataHandlerModel;
 import org.apache.carbondata.processing.store.CarbonFactHandler;
 import org.apache.carbondata.processing.util.CarbonDataProcessorUtil;
 
+import org.apache.log4j.Logger;
+
 public class RowResultProcessor {
 
   private CarbonFactHandler dataHandler;
   private SegmentProperties segmentProperties;
 
-  private static final LogService LOGGER =
+  private CarbonColumn[] noDicAndComplexColumns;
+
+  private static final Logger LOGGER =
       LogServiceFactory.getLogService(RowResultProcessor.class.getName());
 
 
@@ -47,8 +50,9 @@ public class RowResultProcessor {
     CarbonDataProcessorUtil.createLocations(tempStoreLocation);
     this.segmentProperties = segProp;
     String tableName = carbonTable.getTableName();
-    String carbonStoreLocation = CarbonDataProcessorUtil.createCarbonStoreLocation(
-        loadModel.getDatabaseName(), tableName, loadModel.getSegmentId());
+    String carbonStoreLocation = CarbonDataProcessorUtil
+        .createCarbonStoreLocation(loadModel.getCarbonDataLoadSchema().getCarbonTable(),
+            loadModel.getSegmentId());
     CarbonFactDataHandlerModel carbonFactDataHandlerModel =
         CarbonFactDataHandlerModel.getCarbonFactDataHandlerModel(loadModel, carbonTable,
             segProp, tableName, tempStoreLocation, carbonStoreLocation);
@@ -59,6 +63,8 @@ public class RowResultProcessor {
     carbonFactDataHandlerModel.setBucketId(bucketId);
     //Note: set compaction flow just to convert decimal type
     carbonFactDataHandlerModel.setCompactionFlow(true);
+    carbonFactDataHandlerModel.setSegmentId(loadModel.getSegmentId());
+    noDicAndComplexColumns = carbonFactDataHandlerModel.getNoDictAndComplexColumns();
     dataHandler = new CarbonFactDataHandlerColumnar(carbonFactDataHandlerModel);
   }
 
@@ -79,8 +85,8 @@ public class RowResultProcessor {
         this.dataHandler.finish();
       }
       processStatus = true;
-    } catch (AlterPartitionSliceException e) {
-      LOGGER.error(e, e.getMessage());
+    } catch (CarbonDataWriterException e) {
+      LOGGER.error(e.getMessage(), e);
       LOGGER.error("Exception in executing RowResultProcessor" + e.getMessage());
       processStatus = false;
     } finally {
@@ -96,12 +102,13 @@ public class RowResultProcessor {
     return processStatus;
   }
 
-  private void addRow(Object[] carbonTuple) throws AlterPartitionSliceException {
-    CarbonRow row = WriteStepRowUtil.fromMergerRow(carbonTuple, segmentProperties);
+  private void addRow(Object[] carbonTuple) throws CarbonDataWriterException {
+    CarbonRow row = WriteStepRowUtil.fromMergerRow(carbonTuple, segmentProperties,
+        noDicAndComplexColumns);
     try {
       this.dataHandler.addDataToStore(row);
     } catch (CarbonDataWriterException e) {
-      throw new AlterPartitionSliceException("Exception in adding rows in RowResultProcessor", e);
+      throw new CarbonDataWriterException("Exception in adding rows in RowResultProcessor", e);
     }
   }
 }
